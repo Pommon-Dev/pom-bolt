@@ -4,4 +4,12 @@
 
 [build.environment]
   NODE_VERSION = "20.18.0"
-  NODE_OPTIONS = "--max_old_space_size=4096" 
+  NODE_OPTIONS = "--max_old_space_size=4096"
+
+[[redirects]]
+  from = "/*"
+  to = "/"
+  status = 200
+
+[dev]
+  framework = "remix" 
