@@ -1,6 +1,20 @@
 #:schema node_modules/wrangler/config-schema.json
-name = "bolt"
+name = "pom-bolt"
 compatibility_flags = ["nodejs_compat"]
 compatibility_date = "2024-07-01"
 pages_build_output_dir = "./build/client"
-send_metrics = false
+send_metrics = true
+main = "workers-site/index.js"
+
+[build]
+command = "pnpm run build"
+cwd = "."
+
+[site]
+bucket = "./build/client"
+
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+[env.preview]
+vars = { ENVIRONMENT = "preview" }

@@ -8,6 +8,7 @@
   "version": "0.0.7",
   "scripts": {
     "deploy": "npm run build && wrangler pages deploy build",
+    "deploy:cloudflare": "pnpm run build && wrangler pages deploy build/client",
     "build": "NODE_OPTIONS='--max_old_space_size=4096' remix vite:build",
     "dev": "node pre-start.cjs  && remix vite:dev",
     "test": "vitest --run",
@@ -76,6 +77,7 @@
     "@radix-ui/react-tooltip": "^1.1.4",
     "@remix-run/cloudflare": "^2.15.2",
     "@remix-run/cloudflare-pages": "^2.15.2",
+    "@remix-run/node": "^2.16.2",
     "@remix-run/react": "^2.15.2",
     "@tanstack/react-virtual": "^3.13.0",
     "@types/react-beautiful-dnd": "^13.1.8",
