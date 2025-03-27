@@ -8,7 +8,7 @@
   "version": "0.0.7",
   "scripts": {
     "deploy": "npm run build && wrangler pages deploy build",
-    "deploy:cloudflare": "pnpm run build && wrangler pages deploy ./build/client",
+    "deploy:cloudflare": "env-cmd -f .env.production wrangler pages publish build/client --project-name=pom-bolt",
     "build": "NODE_OPTIONS='--max_old_space_size=4096' remix vite:build",
     "dev": "node pre-start.cjs  && remix vite:dev",
     "test": "vitest --run",
@@ -26,7 +26,11 @@
     "typegen": "wrangler types",
     "preview": "pnpm run build && pnpm run start",
     "prepare": "husky",
-    "clean": "node scripts/clean.js"
+    "clean": "node scripts/clean.js",
+    "purge-cache": "tsx scripts/purge-cache.ts",
+    "deploy:purge-cache": "env-cmd -f .env.production bash scripts/purge-pages-cache.sh $CLOUDFLARE_ACCOUNT_ID $CLOUDFLARE_API_TOKEN",
+    "deploy:cloudflare:full": "pnpm run deploy:cloudflare && pnpm run deploy:purge-cache",
+    "deploy:cf": "bash scripts/deploy-cloudflare.sh"
   },
   "engines": {
     "node": ">=18.18.0"
@@ -145,6 +149,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "dotenv": "^16.4.7",
+    "env-cmd": "^10.1.0",
     "fast-glob": "^3.3.2",
     "husky": "9.1.7",
     "is-ci": "^3.0.1",

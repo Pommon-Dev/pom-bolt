@@ -146,43 +146,13 @@ Pom-bolt is an AI-powered development environment built on modern web technologi
    docker run -it -d --name bolt-ai-live -p 5173:5173 --env-file .env.local bolt-ai
    ```
 
-## Taking it to Production
-
-### Cloud Deployment Options
-
-#### 1. Cloudflare Pages (Primary)
-- **Configuration**: Uses `wrangler.toml` for Cloudflare Pages setup
-- **Build Process**: 
-  ```bash
-  pnpm run build
-  pnpm run deploy
-  ```
-- **Environment Variables**: Configure in Cloudflare Pages dashboard
-- **Edge Functions**: Runs on Cloudflare's edge network
-- **Benefits**: Global CDN, automatic HTTPS, edge computing
-
-#### 2. Docker Container Deployment
-- **Build Production Image**:
-  ```bash
-  pnpm run dockerbuild:prod
-  ```
-- **Run Container**:
-  ```bash
-  docker run -it -d --name bolt-ai-live -p 5173:5173 --env-file .env.local bolt-ai
-  ```
-- **Cloud Options**:
-  - AWS EC2/ECS
-  - Google Cloud Run/Compute Engine
-  - Azure Container Instances
-  - DigitalOcean Droplets
-
-#### 3. Netlify Deployment
+#### Netlify Deployment
 - **Configuration**: Uses `netlify.toml`
 - **Build Command**: `pnpm run build`
 - **Publish Directory**: `build/client`
 - **Serverless Functions**: Netlify Functions for API endpoints
 
-### Requirements API and Webhook System
+## Requirements API and Webhook System
 
 #### Overview
 The project includes a robust requirements handling system that supports:
@@ -399,4 +369,4 @@ The project includes a robust requirements handling system that supports:
 - [Vite Documentation](https://vitejs.dev/guide/)
 - [Cloudflare Pages Documentation](https://developers.cloudflare.com/pages/)
 - [Docker Documentation](https://docs.docker.com/)
-- [TypeScript Documentation](https://www.typescriptlang.org/docs/) 
+- [TypeScript Documentation](https://www.typescriptlang.org/docs/)

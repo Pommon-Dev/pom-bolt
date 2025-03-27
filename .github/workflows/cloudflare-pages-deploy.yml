@@ -1,62 +1,77 @@
+# Cloudflare Pages Deployment Workflow
+# This workflow automatically deploys the application to Cloudflare Pages
+# when changes are pushed to the cloudflare-dep branch
+
 name: Deploy to Cloudflare Pages
 
+# Trigger the workflow on push and pull requests to cloudflare-dep branch
 on:
   push:
-    branches: 
-      - cloudflare-dep # Your production branch
+    branches: [cloudflare-dep]
   pull_request:
-    branches:
-      - cloudflare-dep
+    branches: [cloudflare-dep]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    name: Deploy
     permissions:
       contents: read
       deployments: write
+
     steps:
+      # Checkout the repository
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js environment
+      # Set up Node.js environment
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'pnpm'
-      
+
+      # Install PNPM
       - name: Setup PNPM
         uses: pnpm/action-setup@v2
         with:
           version: 9
           run_install: false
-          
+
+      # Install project dependencies
       - name: Install dependencies
         run: pnpm install
-        
+
+      # Build the project
       - name: Build
         run: pnpm build
         env:
-          ENVIRONMENT: production
-          DEFAULT_PROVIDER: anthropic
-          DEFAULT_MODEL: claude-3-5-sonnet-latest
-          BETA_ACCESS_CODES: ${{ secrets.BETA_ACCESS_CODES }}
-        
+          NODE_ENV: production
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Deploy to Cloudflare Pages
       - name: Publish to Cloudflare Pages
-        id: cloudflare-publish
         uses: cloudflare/pages-action@v1
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           projectName: pom-bolt
-          directory: ./build/client
+          directory: build/client
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref_name == 'cloudflare-dep' && 'main' || github.ref_name }}
-        
-      - name: Set Environment Variables in Cloudflare
-        if: github.ref_name == 'cloudflare-dep'
+
+      # Purge Cloudflare Pages cache
+      - name: Purge Cloudflare Pages Cache
+        if: github.ref == 'refs/heads/cloudflare-dep'
+        run: |
+          curl -X DELETE "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CLOUDFLARE_ACCOUNT_ID }}/pages/projects/pom-bolt/cache" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json"
+
+      # Set environment variables in Cloudflare
+      - name: Set Environment Variables
+        if: github.ref == 'refs/heads/cloudflare-dep'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deployment env set --project-name=pom-bolt --branch=main ENVIRONMENT=production DEFAULT_PROVIDER=anthropic DEFAULT_MODEL=claude-3-5-sonnet-latest BETA_ACCESS_CODES=${{ secrets.BETA_ACCESS_CODES }} ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }} OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} 
+          command: secret put BETA_ACCESS_CODES
+          secretValue: ${{ secrets.BETA_ACCESS_CODES }} 

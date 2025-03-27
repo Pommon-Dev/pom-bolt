@@ -1,138 +1,119 @@
-import { json } from '@remix-run/node';
-import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/node';
+import { ActionFunctionArgs, json, LoaderFunctionArgs } from '@remix-run/node';
+import { storage } from '~/lib/modules/storage';
+import { v4 as uuid } from 'uuid';
+import { environment } from '~/config/environment';
+import { getProjectStore } from '~/lib/modules/project-store';
 
-// Simple in-memory storage for requirements (in production, use a database)
-interface RequirementData {
-  content: string;
+export interface RequirementData {
+  id: string;
+  text: string;
   timestamp: number;
-  processed: boolean;
-  projectId?: string;
+  resolved?: boolean;
+  processed?: boolean;
 }
 
-// Define interface for the request body
-interface RequirementsRequestBody {
-  content?: string;
-  requirements?: string;
-  markAsProcessed?: boolean;
-  projectId?: string;
+export interface RequirementsRequestBody {
+  requirements: string[] | RequirementData[];
+  markAsProcessed?: string[];
+  noLLMGeneration?: boolean;
 }
 
-let requirements: RequirementData | null = null;
-
-export async function action({ request }: ActionFunctionArgs) {
+/**
+ * Handles POST requests to /api/requirements endpoint
+ * Processes incoming requirements and triggers code generation if needed
+ */
+export const action = async ({ request }: ActionFunctionArgs) => {
   if (request.method !== 'POST') {
     return json({ error: 'Method not allowed' }, { status: 405 });
   }
 
   try {
-    // Parse request body
-    let body: RequirementsRequestBody;
-    const contentType = request.headers.get('content-type') || '';
-
-    if (contentType.includes('application/json')) {
-      body = (await request.json()) as RequirementsRequestBody;
-    } else {
-      // Handle form data or other formats
-      const formData = await request.formData();
-      body = {
-        content: formData.get('content')?.toString(),
-        requirements: formData.get('requirements')?.toString(),
-        markAsProcessed: formData.get('markAsProcessed') === 'true',
-        projectId: formData.get('projectId')?.toString(),
-      };
+    // Get existing requirements
+    const existingRequirements = await storage.getRequirements();
+    
+    // Parse the request body
+    const body: RequirementsRequestBody = await request.json();
+    
+    // Process incoming requirements
+    let updatedRequirements = [...existingRequirements];
+    
+    // Mark requirements as processed if requested
+    if (body.markAsProcessed && body.markAsProcessed.length > 0) {
+      updatedRequirements = updatedRequirements.map((requirement) => {
+        if (body.markAsProcessed?.includes(requirement.id)) {
+          return { ...requirement, processed: true };
+        }
+        return requirement;
+      });
     }
-
-    console.log('Received webhook request:', { body, contentType });
-
-    // Handle marking requirements as processed
-    if (body.markAsProcessed) {
-      if (requirements) {
-        requirements.processed = true;
-        return json({ success: true, message: 'Requirements marked as processed' });
+    
+    // Process new requirements
+    if (body.requirements && body.requirements.length > 0) {
+      const newRequirements = body.requirements.map((req) => {
+        if (typeof req === 'string') {
+          return {
+            id: uuid(),
+            text: req,
+            timestamp: Date.now(),
+          };
+        }
+        return req;
+      });
+      
+      updatedRequirements = [...updatedRequirements, ...newRequirements];
+    }
+    
+    // Save updated requirements
+    await storage.setRequirements(updatedRequirements);
+    
+    // Trigger code generation if needed and environment supports it
+    const shouldGenerateCode = !body.noLLMGeneration && 
+      (environment.features.fileSystem || environment.isCloudflare);
+    
+    if (shouldGenerateCode) {
+      console.log('Triggering code generation from requirements API');
+      try {
+        const projectStore = await getProjectStore();
+        
+        // Only attempt to generate if we have a project store
+        if (projectStore) {
+          // This will trigger project generation based on the requirements
+          await projectStore.triggerGeneration({
+            requirements: updatedRequirements
+              .filter(r => !r.processed)
+              .map(r => r.text),
+            fromRequirementsAPI: true
+          });
+          
+          console.log('Successfully initiated code generation');
+        } else {
+          console.warn('Project store not available - skipping code generation');
+        }
+      } catch (error) {
+        console.error('Error triggering code generation:', error);
+        // Continue anyway - don't fail the API request if generation fails
       }
-
-      return json({ error: 'No requirements to mark as processed' }, { status: 404 });
+    } else {
+      console.log('Skipping code generation - disabled by request or environment');
     }
-
-    // Use either content or requirements field, preferring content if both are provided
-    const requirementsContent = body.content || body.requirements;
-
-    // Handle new requirements submission
-    if (!requirementsContent || typeof requirementsContent !== 'string') {
-      console.error('Invalid content in request:', body);
-      return json(
-        {
-          error: 'Requirements content is required and must be a string (use field name "content" or "requirements")',
-          received: body,
-        },
-        { status: 400 },
-      );
-    }
-
-    // Store the requirements with a processed flag set to false
-    requirements = {
-      content: requirementsContent,
-      timestamp: Date.now(),
-      processed: false,
-      projectId: body.projectId,
-    };
-
-    console.log('Stored new requirements:', requirements);
-
-    return json({ success: true, message: 'Requirements received' });
+    
+    return json({ success: true, requirements: updatedRequirements });
   } catch (error) {
-    console.error('Error processing requirements webhook:', error);
-    return json(
-      {
-        error: 'Failed to process requirements',
-        details: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 },
-    );
+    console.error('Error processing requirements:', error);
+    return json({ error: 'Failed to process requirements', details: String(error) }, { status: 500 });
   }
-}
+};
 
-// Define interface for response data
-export interface RequirementsResponseData {
-  hasRequirements: boolean;
-  processed: boolean;
-  timestamp: number | null;
-  content: string | null;
-  projectId: string | null;
-}
-
-export async function loader({ request }: LoaderFunctionArgs) {
-  // Only allow GET requests
-  if (request.method !== 'GET') {
-    return json({ error: 'Method not allowed' }, { status: 405 });
+/**
+ * Handles GET requests to /api/requirements endpoint
+ * Returns the current state of requirements
+ */
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  try {
+    const requirements = await storage.getRequirements();
+    return json({ requirements });
+  } catch (error) {
+    console.error('Error fetching requirements:', error);
+    return json({ error: 'Failed to fetch requirements', details: String(error) }, { status: 500 });
   }
-
-  // Return the current requirements state
-  return json({
-    hasRequirements: requirements !== null,
-    processed: requirements?.processed || false,
-    timestamp: requirements?.timestamp || null,
-    content: requirements?.content || null,
-    projectId: requirements?.projectId || null,
-  } as RequirementsResponseData);
-}
-
-// Helper function to mark requirements as processed
-export function markRequirementsAsProcessed() {
-  if (requirements) {
-    requirements.processed = true;
-  }
-}
-
-// Helper function to get and consume the requirements
-export function getAndConsumeRequirements(): { content: string; projectId?: string } | null {
-  if (requirements && !requirements.processed) {
-    const content = requirements.content;
-    const projectId = requirements.projectId;
-    requirements.processed = true;
-
-    return { content, projectId };
-  }
-
-  return null;
-}
+};

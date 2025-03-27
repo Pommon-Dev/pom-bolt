@@ -1,12 +1,25 @@
+# Cloudflare Pages Configuration
+# This file configures how your application is deployed to Cloudflare Pages
+
 #:schema node_modules/wrangler/config-schema.json
 name = "pom-bolt"
+
+# Enable Node.js compatibility mode for Cloudflare Workers
 compatibility_flags = ["nodejs_compat"]
+
+# Set the compatibility date for Cloudflare Workers features
 compatibility_date = "2024-09-23"
+
+# Specify the directory containing the built client files
 pages_build_output_dir = "./build/client"
+
+# Enable metrics collection for monitoring
 send_metrics = true
 
+# Production environment configuration
 [env.production]
-vars = { ENVIRONMENT = "production" }
+vars = { ENVIRONMENT = "production", NODE_ENV = "production" }
 
+# Preview environment configuration (used for PR deployments)
 [env.preview]
-vars = { ENVIRONMENT = "preview" }
+vars = { ENVIRONMENT = "preview", NODE_ENV = "development" }
