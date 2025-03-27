@@ -29,19 +29,19 @@ jobs:
         with:
           ref: ${{ github.event.inputs.branch || github.ref }}
 
-      # Set up Node.js environment
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'pnpm'
-
-      # Install PNPM
+      # Install PNPM first
       - name: Setup PNPM
         uses: pnpm/action-setup@v2
         with:
           version: 9
           run_install: false
+
+      # Set up Node.js environment (after PNPM is available)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
 
       # Install project dependencies
       - name: Install dependencies
