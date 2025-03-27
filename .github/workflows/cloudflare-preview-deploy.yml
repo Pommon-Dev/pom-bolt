@@ -1,0 +1,104 @@
+# Cloudflare Pages Preview Deployment Workflow
+# This workflow deploys the application to Cloudflare Pages in preview mode
+# for ad-hoc testing
+
+name: Deploy to Cloudflare Pages (Preview)
+
+# Trigger the workflow manually or on push to any branch except cloudflare-dep and main
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy (leave empty for current branch)'
+        required: false
+        default: ''
+  push:
+    branches-ignore: [cloudflare-dep, main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      # Set up Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
+
+      # Install PNPM
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+          run_install: false
+
+      # Install project dependencies
+      - name: Install dependencies
+        run: pnpm install
+
+      # Build the project
+      - name: Build
+        run: pnpm build
+        env:
+          NODE_ENV: development
+          ENVIRONMENT: preview
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Deploy to Cloudflare Pages with preview flag
+      - name: Publish to Cloudflare Pages (Preview)
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: pom-bolt
+          directory: build/client
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.event.inputs.branch || github.ref_name }}
+          wranglerVersion: '3'
+          deploymentEnvironment: preview
+
+      # Generate preview URL based on branch name
+      - name: Generate Preview URL
+        id: preview-url
+        run: |
+          BRANCH_NAME="${{ github.event.inputs.branch || github.ref_name }}"
+          SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9]/-/g')
+          PREVIEW_URL="https://$SANITIZED_BRANCH.pom-bolt.pages.dev"
+          echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+          echo "Preview URL: $PREVIEW_URL"
+          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+
+      # Create GitHub deployment
+      - name: Create GitHub Deployment
+        uses: bobheadxi/deployments@v1
+        id: deployment
+        with:
+          step: start
+          token: ${{ secrets.GITHUB_TOKEN }}
+          env: preview-${{ github.event.inputs.branch || github.ref_name }}
+          ref: ${{ github.event.inputs.branch || github.ref }}
+          transient: true
+          desc: "Preview deployment for branch: ${{ github.event.inputs.branch || github.ref_name }}"
+
+      # Update deployment status
+      - name: Update Deployment Status
+        uses: bobheadxi/deployments@v1
+        if: always()
+        with:
+          step: finish
+          token: ${{ secrets.GITHUB_TOKEN }}
+          status: ${{ job.status }}
+          env: ${{ steps.deployment.outputs.env }}
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+          env_url: ${{ steps.preview-url.outputs.url }} 
