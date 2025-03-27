@@ -63,7 +63,6 @@ jobs:
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
           branch: ${{ github.event.inputs.branch || 'cloudflare-dep' }}
           wranglerVersion: '3'
-          deploymentEnvironment: production
 
       # Purge Cloudflare Pages cache
       - name: Purge Cloudflare Pages Cache
