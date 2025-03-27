@@ -78,6 +78,7 @@ jobs:
           echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
           echo "Preview URL: $PREVIEW_URL"
           echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+          echo "ENV_NAME=preview-$SANITIZED_BRANCH" >> $GITHUB_ENV
 
       # Create GitHub deployment
       - name: Create GitHub Deployment
@@ -86,7 +87,7 @@ jobs:
         with:
           step: start
           token: ${{ secrets.GITHUB_TOKEN }}
-          env: preview-${{ github.event.inputs.branch || github.ref_name }}
+          env: ${{ env.ENV_NAME }}
           ref: ${{ github.event.inputs.branch || github.ref }}
           transient: true
           desc: "Preview deployment for branch: ${{ github.event.inputs.branch || github.ref_name }}"
@@ -99,6 +100,6 @@ jobs:
           step: finish
           token: ${{ secrets.GITHUB_TOKEN }}
           status: ${{ job.status }}
-          env: ${{ steps.deployment.outputs.env }}
+          env: ${{ env.ENV_NAME }}
           deployment_id: ${{ steps.deployment.outputs.deployment_id }}
           env_url: ${{ steps.preview-url.outputs.url }} 
