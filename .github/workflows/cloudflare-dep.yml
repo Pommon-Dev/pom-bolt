@@ -18,6 +18,11 @@ jobs:
     permissions:
       contents: read
       deployments: write
+    
+    # Configure environment to access secrets
+    environment:
+      name: cloudflare-pages-production
+      url: https://pom-bolt.pages.dev
 
     steps:
       # Checkout the repository
@@ -55,6 +60,7 @@ jobs:
       # Deploy to Cloudflare Pages
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
+        id: deployment-step
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

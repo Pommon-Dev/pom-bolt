@@ -21,6 +21,11 @@ jobs:
     permissions:
       contents: read
       deployments: write
+    
+    # Configure environment to access secrets
+    environment:
+      name: cloudflare-pages
+      url: ${{ steps.preview-url.outputs.url }}
 
     steps:
       # Checkout the repository
@@ -58,6 +63,7 @@ jobs:
       # Deploy to Cloudflare Pages with preview flag
       - name: Publish to Cloudflare Pages (Preview)
         uses: cloudflare/pages-action@v1
+        id: deployment-step
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
