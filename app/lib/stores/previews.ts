@@ -1,6 +1,10 @@
 import type { WebContainer } from '@webcontainer/api';
 import { atom } from 'nanostores';
 import { environment } from '~/config/environment';
+import { FileSystemAdapter } from '~/lib/fs-adapter';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('PreviewsStore');
 
 // Extend Window interface to include our custom property
 declare global {
@@ -27,6 +31,7 @@ export class PreviewsStore {
   #refreshTimeouts = new Map<string, NodeJS.Timeout>();
   #REFRESH_DELAY = 300;
   #storageChannel: BroadcastChannel;
+  isInitialized = false;
 
   previews = atom<PreviewInfo[]>([]);
 
@@ -147,16 +152,20 @@ export class PreviewsStore {
   }
 
   async #init() {
-    // Skip WebContainer-specific steps in Cloudflare environment
-    if (environment.isCloudflare) {
-      console.log('[Preview] Running in Cloudflare environment, skipping WebContainer setup');
+    if (this.isInitialized) {
       return;
     }
 
+    this.isInitialized = true;
+    const adapter = new FileSystemAdapter();
+    
     try {
       const webcontainer = await this.#webcontainer;
 
-      // Listen for server ready events
+      await adapter.initialize(webcontainer);
+
+      console.log('[Preview] Initialized WebContainer');
+
       webcontainer.on('server-ready', (port, url) => {
         console.log('[Preview] Server ready on port:', port, url);
         this.broadcastUpdate(url);
@@ -168,44 +177,43 @@ export class PreviewsStore {
       // Only set up watchers in development environment
       if (environment.isDevelopment && typeof window !== 'undefined' && environment.features.fileSystem) {
         try {
-          // Check if we're in a non-Cloudflare environment before trying to watch files
-          if (!environment.isCloudflare) {
-            // Watch for file changes
-            const watcher = await webcontainer.fs.watch('**/*', { persistent: true });
+          // Use our adapter to handle file watching safely across environments
+          const watcher = await adapter.watch('**/*', { persistent: true });
 
-            // Use the native watch events if available
-            if (watcher) {
-              try {
-                // Try to use addEventListener if available (cast to any to avoid type errors)
-                (watcher as any).addEventListener?.('change', async () => {
-                  const previews = this.previews.get();
+          // Use the native watch events if available
+          if (watcher) {
+            try {
+              // Try to use addEventListener if available (cast to any to avoid type errors)
+              (watcher as any).addEventListener?.('change', async () => {
+                const previews = this.previews.get();
 
-                  for (const preview of previews) {
-                    const previewId = this.getPreviewId(preview.baseUrl);
+                for (const preview of previews) {
+                  const previewId = this.getPreviewId(preview.baseUrl);
 
-                    if (previewId) {
-                      this.broadcastFileChange(previewId);
-                    }
+                  if (previewId) {
+                    this.broadcastFileChange(previewId);
                   }
-                });
-              } catch (watcherError) {
-                console.warn('[Preview] Could not add event listener to watcher:', watcherError);
-              }
+                }
+              });
+            } catch (watcherError) {
+              console.warn('[Preview] Could not add event listener to watcher:', watcherError);
             }
           }
 
           // Watch for DOM changes that might affect storage
-          const observer = new MutationObserver((_mutations) => {
-            // Broadcast storage changes when DOM changes
-            this._broadcastStorageSync();
-          });
+          if (typeof document !== 'undefined') {
+            const observer = new MutationObserver((_mutations) => {
+              // Broadcast storage changes when DOM changes
+              this._broadcastStorageSync();
+            });
 
-          observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-            attributes: true,
-          });
+            observer.observe(document.body, {
+              childList: true,
+              subtree: true,
+              characterData: true,
+              attributes: true,
+            });
+          }
         } catch (error) {
           console.error('[Preview] Error setting up watchers:', error);
         }

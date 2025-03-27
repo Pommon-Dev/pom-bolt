@@ -14,6 +14,10 @@
  */
 
 import { WebContainer } from '@webcontainer/api';
+import { environment } from '~/config/environment';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('FileSystemAdapter');
 
 export class FileSystemAdapter {
   private webcontainer: WebContainer | null = null;
@@ -21,7 +25,11 @@ export class FileSystemAdapter {
 
   constructor() {
     // Detect if we're running in Cloudflare Pages environment
-    this.isCloudflare = typeof process !== 'undefined' && process.env.NODE_ENV === 'production';
+    this.isCloudflare = environment.isCloudflare;
+    
+    if (this.isCloudflare) {
+      logger.info('Initializing FileSystemAdapter in Cloudflare environment');
+    }
   }
 
   /**
@@ -29,8 +37,9 @@ export class FileSystemAdapter {
    * This is required for browser environments
    */
   async initialize(container?: WebContainer) {
-    if (container) {
+    if (container && !this.isCloudflare) {
       this.webcontainer = container;
+      logger.debug('Initialized with WebContainer');
     }
   }
 
@@ -43,13 +52,14 @@ export class FileSystemAdapter {
     if (this.isCloudflare) {
       // In Cloudflare, fetch from our storage API
       try {
+        logger.debug(`Reading file from Cloudflare storage: ${path}`);
         const response = await fetch(`/api/fs/${encodeURIComponent(path)}`);
         if (!response.ok) {
           throw new Error(`Failed to read file: ${path}`);
         }
         return await response.text();
       } catch (error) {
-        console.error('Error reading file:', error);
+        logger.error(`Error reading file from Cloudflare storage: ${path}`, { error });
         return '';
       }
     }
@@ -57,10 +67,11 @@ export class FileSystemAdapter {
     // In browser, use WebContainer's filesystem
     if (this.webcontainer) {
       try {
+        logger.debug(`Reading file from WebContainer: ${path}`);
         const file = await this.webcontainer.fs.readFile(path, 'utf-8');
         return file;
       } catch (error) {
-        console.error('Error reading file from WebContainer:', error);
+        logger.error(`Error reading file from WebContainer: ${path}`, { error });
         return '';
       }
     }
@@ -77,6 +88,7 @@ export class FileSystemAdapter {
     if (this.isCloudflare) {
       // In Cloudflare, write to our storage API
       try {
+        logger.debug(`Writing file to Cloudflare storage: ${path}`);
         await fetch(`/api/fs/${encodeURIComponent(path)}`, {
           method: 'POST',
           headers: {
@@ -85,16 +97,17 @@ export class FileSystemAdapter {
           body: JSON.stringify({ content }),
         });
       } catch (error) {
-        console.error('Error writing file:', error);
+        logger.error(`Error writing file to Cloudflare storage: ${path}`, { error });
         throw error;
       }
     } else {
       // In browser, use WebContainer's filesystem
       if (this.webcontainer) {
         try {
+          logger.debug(`Writing file to WebContainer: ${path}`);
           await this.webcontainer.fs.writeFile(path, content, 'utf-8');
         } catch (error) {
-          console.error('Error writing file to WebContainer:', error);
+          logger.error(`Error writing file to WebContainer: ${path}`, { error });
           throw error;
         }
       }
@@ -109,23 +122,70 @@ export class FileSystemAdapter {
   async exists(path: string): Promise<boolean> {
     if (this.isCloudflare) {
       try {
+        logger.debug(`Checking if file exists in Cloudflare storage: ${path}`);
         const response = await fetch(`/api/fs/${encodeURIComponent(path)}/exists`);
         return response.ok;
       } catch (error) {
-        console.error('Error checking file existence:', error);
+        logger.error(`Error checking file existence in Cloudflare storage: ${path}`, { error });
         return false;
       }
     }
 
     if (this.webcontainer) {
       try {
-        const stats = await this.webcontainer.fs.stat(path);
-        return stats !== null;
+        logger.debug(`Checking if file exists in WebContainer: ${path}`);
+        // Use try-catch with stat API
+        try {
+          // Access the internal fs stat method, wrapped in try/catch since it might not be publicly typed
+          const stats = await (this.webcontainer.fs as any).stat(path);
+          return stats !== null;
+        } catch (statError) {
+          // Alternatively, try to read the file and see if it errors
+          await this.webcontainer.fs.readFile(path);
+          return true;
+        }
       } catch (error) {
+        logger.debug(`File does not exist in WebContainer: ${path}`);
         return false;
       }
     }
 
     return false;
+  }
+
+  /**
+   * Watch a directory for changes - only works in browser environments
+   * In Cloudflare, this is a no-op that returns a dummy watcher
+   * @param path - The path to watch
+   * @param options - Watch options
+   * @returns A watcher object or null
+   */
+  async watch(path: string, options: { persistent?: boolean } = {}): Promise<any> {
+    // In Cloudflare, return a dummy watcher that does nothing
+    if (this.isCloudflare) {
+      logger.warn(`File watching not supported in Cloudflare environment: ${path}`);
+      // Return a dummy watcher object that does nothing
+      return {
+        addEventListener: (event: string, callback: () => void) => {
+          logger.debug(`Dummy watcher addEventListener called with event: ${event}`);
+        },
+        close: () => {
+          logger.debug('Dummy watcher close called');
+        }
+      };
+    }
+
+    // In browser, use WebContainer's filesystem watcher if available
+    if (this.webcontainer) {
+      try {
+        logger.debug(`Setting up file watcher in WebContainer: ${path}`);
+        return await this.webcontainer.fs.watch(path, options);
+      } catch (error) {
+        logger.error(`Error setting up file watcher in WebContainer: ${path}`, { error });
+        return null;
+      }
+    }
+
+    return null;
   }
 } 
