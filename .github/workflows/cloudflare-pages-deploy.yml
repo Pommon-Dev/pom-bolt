@@ -18,6 +18,11 @@ jobs:
       contents: read
       deployments: write
 
+    # Configure environment to access secrets
+    environment:
+      name: cloudflare-pages-production
+      url: https://pom-bolt.pages.dev
+
     steps:
       # Checkout the repository
       - name: Checkout
