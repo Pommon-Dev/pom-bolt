@@ -166,28 +166,31 @@ export class PreviewsStore {
       });
 
       // Only set up watchers in development environment
-      if (environment.isDevelopment && typeof window !== 'undefined') {
+      if (environment.isDevelopment && typeof window !== 'undefined' && environment.features.fileSystem) {
         try {
-          // Watch for file changes
-          const watcher = await webcontainer.fs.watch('**/*', { persistent: true });
+          // Check if we're in a non-Cloudflare environment before trying to watch files
+          if (!environment.isCloudflare) {
+            // Watch for file changes
+            const watcher = await webcontainer.fs.watch('**/*', { persistent: true });
 
-          // Use the native watch events if available
-          if (watcher) {
-            try {
-              // Try to use addEventListener if available (cast to any to avoid type errors)
-              (watcher as any).addEventListener?.('change', async () => {
-                const previews = this.previews.get();
+            // Use the native watch events if available
+            if (watcher) {
+              try {
+                // Try to use addEventListener if available (cast to any to avoid type errors)
+                (watcher as any).addEventListener?.('change', async () => {
+                  const previews = this.previews.get();
 
-                for (const preview of previews) {
-                  const previewId = this.getPreviewId(preview.baseUrl);
+                  for (const preview of previews) {
+                    const previewId = this.getPreviewId(preview.baseUrl);
 
-                  if (previewId) {
-                    this.broadcastFileChange(previewId);
+                    if (previewId) {
+                      this.broadcastFileChange(previewId);
+                    }
                   }
-                }
-              });
-            } catch (watcherError) {
-              console.warn('[Preview] Could not add event listener to watcher:', watcherError);
+                });
+              } catch (watcherError) {
+                console.warn('[Preview] Could not add event listener to watcher:', watcherError);
+              }
             }
           }
 
