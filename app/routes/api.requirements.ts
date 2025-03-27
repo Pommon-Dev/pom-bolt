@@ -1,8 +1,9 @@
-import { ActionFunctionArgs, json, LoaderFunctionArgs } from '@remix-run/node';
-import { storage } from '~/lib/modules/storage';
+import { json } from '@remix-run/node';
+import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/node';
 import { v4 as uuid } from 'uuid';
 import { environment } from '~/config/environment';
-import { getProjectStore } from '~/lib/modules/project-store';
+import { storage } from '~/lib/storage';
+import { projectStore } from '~/lib/stores/project';
 
 export interface RequirementData {
   id: string;
@@ -16,6 +17,15 @@ export interface RequirementsRequestBody {
   requirements: string[] | RequirementData[];
   markAsProcessed?: string[];
   noLLMGeneration?: boolean;
+}
+
+// Legacy interface for backwards compatibility
+export interface RequirementsResponseData {
+  hasRequirements: boolean;
+  processed: boolean;
+  timestamp: number | null;
+  content: string | null;
+  projectId: string | null;
 }
 
 /**
@@ -73,8 +83,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (shouldGenerateCode) {
       console.log('Triggering code generation from requirements API');
       try {
-        const projectStore = await getProjectStore();
-        
         // Only attempt to generate if we have a project store
         if (projectStore) {
           // This will trigger project generation based on the requirements

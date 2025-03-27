@@ -58,11 +58,13 @@ export default function BetaAccess() {
           </Button>
         </Form>
         
-        {actionData?.error && (
-          <p className="text-sm text-destructive text-center">
-            {actionData.error}
-          </p>
-        )}
+        <div className="mt-4">
+          {actionData && 'error' in actionData && (
+            <p className="text-red-500 text-center">
+              {actionData.error}
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );

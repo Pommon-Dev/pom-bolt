@@ -119,6 +119,7 @@ export class FileSystemAdapter {
 
     if (this.webcontainer) {
       try {
+        // @ts-ignore WebContainer types are incorrect
         const stats = await this.webcontainer.fs.stat(path);
         return stats !== null;
       } catch (error) {
