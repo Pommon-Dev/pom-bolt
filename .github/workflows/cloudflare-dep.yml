@@ -42,7 +42,7 @@ jobs:
 
       # Install project dependencies
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
       # Build the project
       - name: Build
