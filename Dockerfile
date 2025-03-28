@@ -59,6 +59,60 @@ RUN pnpm run build
 
 CMD [ "pnpm", "run", "dockerstart"]
 
+# Google Cloud Run optimized image
+FROM base AS bolt-ai-cloudrun
+
+# Define environment variables with default values or let them be overridden
+ARG GROQ_API_KEY
+ARG HuggingFace_API_KEY
+ARG OPENAI_API_KEY
+ARG ANTHROPIC_API_KEY
+ARG OPEN_ROUTER_API_KEY
+ARG GOOGLE_GENERATIVE_AI_API_KEY
+ARG OLLAMA_API_BASE_URL
+ARG XAI_API_KEY
+ARG TOGETHER_API_KEY
+ARG TOGETHER_API_BASE_URL
+ARG AWS_BEDROCK_CONFIG
+ARG VITE_LOG_LEVEL=debug
+ARG DEFAULT_NUM_CTX
+
+ENV NODE_ENV=production \
+    GROQ_API_KEY=${GROQ_API_KEY} \
+    HuggingFace_KEY=${HuggingFace_API_KEY} \
+    OPENAI_API_KEY=${OPENAI_API_KEY} \
+    ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY} \
+    OPEN_ROUTER_API_KEY=${OPEN_ROUTER_API_KEY} \
+    GOOGLE_GENERATIVE_AI_API_KEY=${GOOGLE_GENERATIVE_AI_API_KEY} \
+    OLLAMA_API_BASE_URL=${OLLAMA_API_BASE_URL} \
+    XAI_API_KEY=${XAI_API_KEY} \
+    TOGETHER_API_KEY=${TOGETHER_API_KEY} \
+    TOGETHER_API_BASE_URL=${TOGETHER_API_BASE_URL} \
+    AWS_BEDROCK_CONFIG=${AWS_BEDROCK_CONFIG} \
+    VITE_LOG_LEVEL=${VITE_LOG_LEVEL} \
+    DEFAULT_NUM_CTX=${DEFAULT_NUM_CTX}\
+    RUNNING_IN_DOCKER=true \
+    ENVIRONMENT=production \
+    PORT=8080
+
+# Build the application with production settings
+RUN pnpm run build
+
+# Install Express for serving the app
+RUN pnpm add express compression serve-static
+
+# Copy the server configuration for Cloud Run
+COPY server.js ./
+
+# Expose the port used by Cloud Run
+EXPOSE 8080
+
+# Use a non-root user for better security
+USER node
+
+# Command to run the Express server
+CMD ["node", "server.js"]
+
 # Development image
 FROM base AS bolt-ai-development
 
