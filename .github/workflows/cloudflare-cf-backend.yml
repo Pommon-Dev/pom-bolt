@@ -1,0 +1,81 @@
+# Cloudflare Backend Architecture Preview Deployment Workflow
+# This workflow deploys the cf-backend-architecture branch to Cloudflare Pages
+# to test the enhanced file system handling
+
+name: Deploy CF Backend Architecture
+
+# Trigger the workflow on push to cf-backend-architecture branch
+on:
+  push:
+    branches: [cf-backend-architecture]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    
+    # Configure environment to access secrets
+    environment:
+      name: cloudflare-pages
+      url: ${{ steps.preview-url.outputs.url }}
+
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install PNPM first
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+          run_install: false
+
+      # Set up Node.js environment (after PNPM is available)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
+
+      # Install project dependencies
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # Build the project
+      - name: Build
+        run: pnpm build
+        env:
+          NODE_ENV: development
+          ENVIRONMENT: preview
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DEFAULT_PROVIDER: anthropic
+          DEFAULT_MODEL: claude-3-5-sonnet-latest
+          BETA_ACCESS_CODES: ${{ secrets.BETA_ACCESS_CODES }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # Deploy to Cloudflare Pages with preview flag
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        id: deployment
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: pom-bolt
+          directory: build/client
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          branch: backend-architecture
+          wranglerVersion: '3'
+
+      # Generate preview URL
+      - name: Generate Preview URL
+        id: preview-url
+        run: |
+          PREVIEW_URL="https://backend-architecture.pom-bolt.pages.dev"
+          echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+          echo "Preview URL: $PREVIEW_URL"
+          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT 

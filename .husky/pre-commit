@@ -3,7 +3,7 @@
 echo "🔍 Running pre-commit hook to check the code looks good... 🔍"
 
 # Load NVM if available (useful for managing Node.js versions)
-export NVM_DIR="$HOME/.nvm"
+export NVM_DIR="~/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
 # Ensure `pnpm` is available

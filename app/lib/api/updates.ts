@@ -14,6 +14,9 @@ interface PackageJson {
   [key: string]: unknown;
 }
 
+// Import environment config
+import { environment } from '~/config/environment';
+
 function compareVersions(v1: string, v2: string): number {
   // Remove 'v' prefix if present
   const version1 = v1.replace(/^v/, '');
@@ -34,22 +37,30 @@ function compareVersions(v1: string, v2: string): number {
   return 0;
 }
 
+// Define a fallback version in case we can't access package.json
+const FALLBACK_VERSION = '0.0.1';
+
 export const checkForUpdates = async (): Promise<UpdateCheckResult> => {
   try {
-    // Get the current version from local package.json
-    const packageResponse = await fetch('/package.json');
+    let currentVersion = FALLBACK_VERSION;
 
-    if (!packageResponse.ok) {
-      throw new Error('Failed to fetch local package.json');
+    // Skip package.json fetch in Cloudflare environment
+    if (!environment.isCloudflare) {
+      try {
+        // Get the current version from local package.json
+        const packageResponse = await fetch('/package.json');
+
+        if (packageResponse.ok) {
+          const packageData = (await packageResponse.json()) as PackageJson;
+          if (packageData.version && typeof packageData.version === 'string') {
+            currentVersion = packageData.version;
+          }
+        }
+      } catch (error) {
+        console.warn('Could not access local package.json, using fallback version');
+        // Continue with fallback version
+      }
     }
-
-    const packageData = (await packageResponse.json()) as PackageJson;
-
-    if (!packageData.version || typeof packageData.version !== 'string') {
-      throw new Error('Invalid package.json format: missing or invalid version');
-    }
-
-    const currentVersion = packageData.version;
 
     /*
      * Get the latest version from GitHub's main branch package.json
