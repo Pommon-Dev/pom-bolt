@@ -1,0 +1,112 @@
+# Cloudflare Pages Production Deployment Workflow
+# This is a copy of the main deployment workflow with the PNPM setup order fixed
+
+name: Deploy to Cloudflare Pages (Production)
+
+# Trigger the workflow only manually for testing
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy (leave empty for cloudflare-dep)'
+        required: false
+        default: 'cloudflare-dep'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    
+    # Configure environment to access secrets
+    environment:
+      name: cloudflare-pages-production
+      url: https://pom-bolt.pages.dev
+
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'cloudflare-dep' }}
+
+      # Install PNPM first
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+          run_install: false
+
+      # Set up Node.js environment (after PNPM is available)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
+
+      # Install project dependencies
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # Build the project
+      - name: Build
+        run: pnpm build
+        env:
+          NODE_ENV: production
+          ENVIRONMENT: production
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Deploy to Cloudflare Pages
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        id: deployment-step
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: pom-bolt
+          directory: build/client
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.event.inputs.branch || 'cloudflare-dep' }}
+          wranglerVersion: '3'
+
+      # Purge Cloudflare Pages cache
+      - name: Purge Cloudflare Pages Cache
+        run: |
+          curl -X DELETE "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CLOUDFLARE_ACCOUNT_ID }}/pages/projects/pom-bolt/cache" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json"
+
+      # Generate Preview URL
+      - name: Generate Production URL
+        id: production-url
+        run: |
+          PREVIEW_URL="https://pom-bolt.pages.dev"
+          echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+          echo "Preview URL: $PREVIEW_URL"
+          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+          echo "ENV_NAME=production" >> $GITHUB_ENV
+
+      # Create GitHub deployment
+      - name: Create GitHub Deployment
+        uses: bobheadxi/deployments@v1
+        id: deployment
+        with:
+          step: start
+          token: ${{ secrets.GITHUB_TOKEN }}
+          env: ${{ env.ENV_NAME }}
+          ref: ${{ github.event.inputs.branch || 'cloudflare-dep' }}
+          transient: false
+          desc: "Production deployment from branch: ${{ github.event.inputs.branch || 'cloudflare-dep' }}"
+
+      # Update deployment status
+      - name: Update Deployment Status
+        uses: bobheadxi/deployments@v1
+        if: always()
+        with:
+          step: finish
+          token: ${{ secrets.GITHUB_TOKEN }}
+          status: ${{ job.status }}
+          env: ${{ env.ENV_NAME }}
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+          env_url: ${{ steps.production-url.outputs.url }} 

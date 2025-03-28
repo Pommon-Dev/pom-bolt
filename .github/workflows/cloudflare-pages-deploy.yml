@@ -1,0 +1,82 @@
+# Cloudflare Pages Deployment Workflow
+# This workflow automatically deploys the application to Cloudflare Pages
+# when changes are pushed to the cloudflare-dep branch
+
+name: Deploy to Cloudflare Pages
+
+# Trigger the workflow on push and pull requests to cloudflare-dep branch
+on:
+  push:
+    branches: [cloudflare-dep]
+  pull_request:
+    branches: [cloudflare-dep]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
+    # Configure environment to access secrets
+    environment:
+      name: cloudflare-pages-production
+      url: https://pom-bolt.pages.dev
+
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Set up Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
+
+      # Install PNPM
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+          run_install: false
+
+      # Install project dependencies
+      - name: Install dependencies
+        run: pnpm install
+
+      # Build the project
+      - name: Build
+        run: pnpm build
+        env:
+          NODE_ENV: production
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Deploy to Cloudflare Pages
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: pom-bolt
+          directory: build/client
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      # Purge Cloudflare Pages cache
+      - name: Purge Cloudflare Pages Cache
+        if: github.ref == 'refs/heads/cloudflare-dep'
+        run: |
+          curl -X DELETE "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CLOUDFLARE_ACCOUNT_ID }}/pages/projects/pom-bolt/cache" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json"
+
+      # Set environment variables in Cloudflare
+      - name: Set Environment Variables
+        if: github.ref == 'refs/heads/cloudflare-dep'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: secret put BETA_ACCESS_CODES
+          secretValue: ${{ secrets.BETA_ACCESS_CODES }} 
