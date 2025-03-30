@@ -10,7 +10,6 @@ import { DndProvider } from 'react-dnd';
 import { HTML5Backend } from 'react-dnd-html5-backend';
 import { json } from '@remix-run/cloudflare';
 import type { LoaderFunctionArgs } from '@remix-run/cloudflare';
-import { useLoaderData } from '@remix-run/react';
 import { loader as betaAuthLoader } from './middleware/beta-auth.server';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
@@ -95,11 +94,11 @@ interface BetaAuthResponse {
 export async function loader(args: LoaderFunctionArgs) {
   // Check beta access first
   const betaAuthResponse = await betaAuthLoader(args);
-  
+
   // Clone the response before reading it to avoid "Body already read" error
   const betaAuthClone = betaAuthResponse.clone();
-  const betaAuth = await betaAuthClone.json() as BetaAuthResponse;
-  
+  const betaAuth = (await betaAuthClone.json()) as BetaAuthResponse;
+
   if (!betaAuth.authorized) {
     return betaAuthResponse;
   }

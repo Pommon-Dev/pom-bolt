@@ -1,0 +1,135 @@
+# Cloudflare Pages Preview Deployment Workflow
+# This workflow deploys the application to Cloudflare Pages in preview mode
+# for ad-hoc testing
+
+name: Deploy to Cloudflare Pages (Preview)
+
+# Trigger the workflow manually or on push to any branch except cloudflare-dep and main
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy (leave empty for current branch)'
+        required: false
+        default: ''
+  push:
+    branches-ignore: [cloudflare-dep, main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    
+    # Configure environment to access secrets
+    environment:
+      name: cloudflare-pages
+      url: ${{ steps.preview-url.outputs.url }}
+
+    steps:
+      # Checkout the repository
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      # Install PNPM first
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+          run_install: false
+
+      # Set up Node.js environment (after PNPM is available)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
+
+      # Check if Cloudflare Pages project exists and create if it doesn't
+      - name: Check Cloudflare Pages Project
+        id: check-project
+        run: |
+          echo "Installing Wrangler..."
+          npm install -g wrangler
+          
+          echo "Checking if project exists..."
+          PROJECT_LIST=$(wrangler pages project list --json)
+          echo "$PROJECT_LIST" | grep -q '"name":"pom-bolt"'
+          if [ $? -ne 0 ]; then
+            echo "Project does not exist. Creating project..."
+            wrangler pages project create pom-bolt --production-branch=cloudflare-dep
+            if [ $? -ne 0 ]; then
+              echo "Failed to create project. Check permissions and try again."
+              exit 1
+            fi
+            echo "Project created successfully!"
+          else
+            echo "Project already exists!"
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Install project dependencies
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # Build the project
+      - name: Build
+        run: pnpm build
+        env:
+          NODE_ENV: development
+          ENVIRONMENT: preview
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Deploy to Cloudflare Pages with preview flag
+      - name: Publish to Cloudflare Pages (Preview)
+        uses: cloudflare/pages-action@v1
+        id: deployment-step
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: pom-bolt
+          directory: build/client
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.event.inputs.branch || github.ref_name }}
+          wranglerVersion: '3'
+
+      # Generate preview URL based on branch name
+      - name: Generate Preview URL
+        id: preview-url
+        run: |
+          BRANCH_NAME="${{ github.event.inputs.branch || github.ref_name }}"
+          SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9]/-/g')
+          PREVIEW_URL="https://$SANITIZED_BRANCH.pom-bolt.pages.dev"
+          echo "PREVIEW_URL=$PREVIEW_URL" >> $GITHUB_ENV
+          echo "Preview URL: $PREVIEW_URL"
+          echo "url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+          echo "ENV_NAME=preview-$SANITIZED_BRANCH" >> $GITHUB_ENV
+
+      # Create GitHub deployment
+      - name: Create GitHub Deployment
+        uses: bobheadxi/deployments@v1
+        id: deployment
+        with:
+          step: start
+          token: ${{ secrets.GITHUB_TOKEN }}
+          env: ${{ env.ENV_NAME }}
+          ref: ${{ github.event.inputs.branch || github.ref }}
+          transient: true
+          desc: "Preview deployment for branch: ${{ github.event.inputs.branch || github.ref_name }}"
+
+      # Update deployment status
+      - name: Update Deployment Status
+        uses: bobheadxi/deployments@v1
+        if: always()
+        with:
+          step: finish
+          token: ${{ secrets.GITHUB_TOKEN }}
+          status: ${{ job.status }}
+          env: ${{ env.ENV_NAME }}
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+          env_url: ${{ steps.preview-url.outputs.url }} 
