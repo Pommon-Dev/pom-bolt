@@ -10,6 +10,12 @@ on:
     branches: [cloudflare-dep]
   pull_request:
     branches: [cloudflare-dep]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy (leave empty for cloudflare-dep)'
+        required: false
+        default: 'cloudflare-dep'
 
 jobs:
   deploy:
@@ -27,20 +33,22 @@ jobs:
       # Checkout the repository
       - name: Checkout
         uses: actions/checkout@v4
-
-      # Set up Node.js environment
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'pnpm'
+          ref: ${{ github.event.inputs.branch || 'cloudflare-dep' }}
 
-      # Install PNPM
+      # Install PNPM first
       - name: Setup PNPM
         uses: pnpm/action-setup@v2
         with:
           version: 9
           run_install: false
+
+      # Set up Node.js environment (after PNPM is available)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'pnpm'
 
       # Check if Cloudflare Pages project exists and create if it doesn't
       - name: Check Cloudflare Pages Project
