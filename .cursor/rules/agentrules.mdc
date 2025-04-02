@@ -1,0 +1,12 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+# Your rule content
+Always use TypeScript with strict mode
+Prefer async/await over promises
+Avoid deprecated npm packages
+Prefer functional programming over classes
+Keep responses concise and code-focused
