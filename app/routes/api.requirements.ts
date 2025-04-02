@@ -1,23 +1,18 @@
 import { json } from '@remix-run/node';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/node';
+import { createScopedLogger } from '~/utils/logger';
+import { getProjectStateManager } from '~/lib/projects';
+import { handleProjectContext } from '~/lib/middleware/project-context';
 
-// Simple in-memory storage for requirements (in production, use a database)
-interface RequirementData {
-  content: string;
-  timestamp: number;
-  processed: boolean;
-  projectId?: string;
-}
+const logger = createScopedLogger('api-requirements');
 
 // Define interface for the request body
 interface RequirementsRequestBody {
   content?: string;
   requirements?: string;
-  markAsProcessed?: boolean;
   projectId?: string;
+  userId?: string;
 }
-
-let requirements: RequirementData | null = null;
 
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== 'POST') {
@@ -37,29 +32,22 @@ export async function action({ request }: ActionFunctionArgs) {
       body = {
         content: formData.get('content')?.toString(),
         requirements: formData.get('requirements')?.toString(),
-        markAsProcessed: formData.get('markAsProcessed') === 'true',
         projectId: formData.get('projectId')?.toString(),
+        userId: formData.get('userId')?.toString(),
       };
     }
 
-    console.log('Received webhook request:', { body, contentType });
-
-    // Handle marking requirements as processed
-    if (body.markAsProcessed) {
-      if (requirements) {
-        requirements.processed = true;
-        return json({ success: true, message: 'Requirements marked as processed' });
-      }
-
-      return json({ error: 'No requirements to mark as processed' }, { status: 404 });
-    }
+    logger.info('Received requirements request', { 
+      projectId: body.projectId,
+      hasContent: Boolean(body.content || body.requirements) 
+    });
 
     // Use either content or requirements field, preferring content if both are provided
     const requirementsContent = body.content || body.requirements;
 
-    // Handle new requirements submission
+    // Validate the content
     if (!requirementsContent || typeof requirementsContent !== 'string') {
-      console.error('Invalid content in request:', body);
+      logger.error('Invalid content in request:', body);
       return json(
         {
           error: 'Requirements content is required and must be a string (use field name "content" or "requirements")',
@@ -69,19 +57,46 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    // Store the requirements with a processed flag set to false
-    requirements = {
-      content: requirementsContent,
-      timestamp: Date.now(),
-      processed: false,
-      projectId: body.projectId,
-    };
+    // Process the project context to handle existing and new projects
+    const projectContext = await handleProjectContext(request, {
+      autoCreateProject: true,
+      defaultProjectName: `Project ${new Date().toLocaleDateString()}`,
+    });
 
-    console.log('Stored new requirements:', requirements);
+    const projectManager = getProjectStateManager();
+    const { projectId, isNewProject } = projectContext;
 
-    return json({ success: true, message: 'Requirements received' });
+    // This is a new project or update to an existing one
+    if (isNewProject) {
+      if (!projectContext.project) {
+        // Create the project if it wasn't auto-created by middleware
+        await projectManager.createProject({
+          name: `Project ${new Date().toLocaleDateString()}`,
+          initialRequirements: requirementsContent,
+          userId: body.userId,
+        });
+        
+        logger.info(`Created new project: ${projectId}`);
+      } else {
+        logger.info(`Using auto-created project: ${projectId}`);
+      }
+    } else {
+      // Update existing project with new requirements
+      await projectManager.updateProject(projectId, {
+        newRequirements: requirementsContent
+      });
+      
+      logger.info(`Updated existing project: ${projectId}`);
+    }
+
+    return json({ 
+      success: true, 
+      message: 'Requirements received', 
+      projectId,
+      isNewProject
+    });
   } catch (error) {
-    console.error('Error processing requirements webhook:', error);
+    logger.error('Error processing requirements:', error);
     return json(
       {
         error: 'Failed to process requirements',
@@ -95,10 +110,12 @@ export async function action({ request }: ActionFunctionArgs) {
 // Define interface for response data
 export interface RequirementsResponseData {
   hasRequirements: boolean;
-  processed: boolean;
-  timestamp: number | null;
-  content: string | null;
+  latestRequirements: {
+    content: string;
+    timestamp: number;
+  } | null;
   projectId: string | null;
+  requirementsCount: number;
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -107,32 +124,68 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ error: 'Method not allowed' }, { status: 405 });
   }
 
-  // Return the current requirements state
-  return json({
-    hasRequirements: requirements !== null,
-    processed: requirements?.processed || false,
-    timestamp: requirements?.timestamp || null,
-    content: requirements?.content || null,
-    projectId: requirements?.projectId || null,
-  } as RequirementsResponseData);
-}
-
-// Helper function to mark requirements as processed
-export function markRequirementsAsProcessed() {
-  if (requirements) {
-    requirements.processed = true;
+  try {
+    // Check if a project ID was provided in the query params
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get('projectId');
+    
+    if (!projectId) {
+      return json({
+        hasRequirements: false,
+        latestRequirements: null,
+        projectId: null,
+        requirementsCount: 0
+      } as RequirementsResponseData);
+    }
+    
+    // Get the project state manager
+    const projectManager = getProjectStateManager();
+    
+    // Check if the project exists
+    const exists = await projectManager.projectExists(projectId);
+    if (!exists) {
+      return json({
+        hasRequirements: false,
+        latestRequirements: null,
+        projectId,
+        requirementsCount: 0
+      } as RequirementsResponseData);
+    }
+    
+    // Get the requirements history
+    const requirementsHistory = await projectManager.getRequirementsHistory(projectId);
+    
+    // No requirements
+    if (requirementsHistory.length === 0) {
+      return json({
+        hasRequirements: false,
+        latestRequirements: null,
+        projectId,
+        requirementsCount: 0
+      } as RequirementsResponseData);
+    }
+    
+    // Sort requirements by timestamp (newest first)
+    const sortedRequirements = [...requirementsHistory].sort((a, b) => b.timestamp - a.timestamp);
+    const latestRequirement = sortedRequirements[0];
+    
+    return json({
+      hasRequirements: true,
+      latestRequirements: {
+        content: latestRequirement.content,
+        timestamp: latestRequirement.timestamp
+      },
+      projectId,
+      requirementsCount: requirementsHistory.length
+    } as RequirementsResponseData);
+  } catch (error) {
+    logger.error('Error retrieving requirements:', error);
+    return json(
+      {
+        error: 'Failed to retrieve requirements',
+        details: error instanceof Error ? error.message : String(error),
+      },
+      { status: 500 },
+    );
   }
-}
-
-// Helper function to get and consume the requirements
-export function getAndConsumeRequirements(): { content: string; projectId?: string } | null {
-  if (requirements && !requirements.processed) {
-    const content = requirements.content;
-    const projectId = requirements.projectId;
-    requirements.processed = true;
-
-    return { content, projectId };
-  }
-
-  return null;
 }
