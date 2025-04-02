@@ -2,6 +2,7 @@ import { json } from '@remix-run/node';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/node';
 import { createScopedLogger } from '~/utils/logger';
 import { getProjectStateManager } from '~/lib/projects';
+import { runRequirementsChain } from '~/lib/middleware/requirements-chain';
 import { handleProjectContext } from '~/lib/middleware/project-context';
 
 const logger = createScopedLogger('api-requirements');
@@ -12,6 +13,13 @@ interface RequirementsRequestBody {
   requirements?: string;
   projectId?: string;
   userId?: string;
+  deploy?: boolean;
+  deployment?: {
+    platform?: string;
+    settings?: Record<string, any>;
+  };
+  deploymentTarget?: string;
+  deploymentOptions?: Record<string, any>;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -20,81 +28,44 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   try {
-    // Parse request body
-    let body: RequirementsRequestBody;
-    const contentType = request.headers.get('content-type') || '';
-
-    if (contentType.includes('application/json')) {
-      body = (await request.json()) as RequirementsRequestBody;
-    } else {
-      // Handle form data or other formats
-      const formData = await request.formData();
-      body = {
-        content: formData.get('content')?.toString(),
-        requirements: formData.get('requirements')?.toString(),
-        projectId: formData.get('projectId')?.toString(),
-        userId: formData.get('userId')?.toString(),
-      };
-    }
-
-    logger.info('Received requirements request', { 
-      projectId: body.projectId,
-      hasContent: Boolean(body.content || body.requirements) 
-    });
-
-    // Use either content or requirements field, preferring content if both are provided
-    const requirementsContent = body.content || body.requirements;
-
-    // Validate the content
-    if (!requirementsContent || typeof requirementsContent !== 'string') {
-      logger.error('Invalid content in request:', body);
+    // Use the new middleware chain to process the request
+    const result = await runRequirementsChain(request);
+    
+    // Handle any errors that occurred during processing
+    if (result.error) {
+      logger.error('Error processing requirements:', result.error);
       return json(
         {
-          error: 'Requirements content is required and must be a string (use field name "content" or "requirements")',
-          received: body,
+          error: 'Failed to process requirements',
+          message: result.error.message,
+          details: result.error.stack
         },
-        { status: 400 },
+        { status: 500 }
       );
     }
-
-    // Process the project context to handle existing and new projects
-    const projectContext = await handleProjectContext(request, {
-      autoCreateProject: true,
-      defaultProjectName: `Project ${new Date().toLocaleDateString()}`,
-    });
-
-    const projectManager = getProjectStateManager();
-    const { projectId, isNewProject } = projectContext;
-
-    // This is a new project or update to an existing one
-    if (isNewProject) {
-      if (!projectContext.project) {
-        // Create the project if it wasn't auto-created by middleware
-        await projectManager.createProject({
-          name: `Project ${new Date().toLocaleDateString()}`,
-          initialRequirements: requirementsContent,
-          userId: body.userId,
-        });
-        
-        logger.info(`Created new project: ${projectId}`);
-      } else {
-        logger.info(`Using auto-created project: ${projectId}`);
-      }
-    } else {
-      // Update existing project with new requirements
-      await projectManager.updateProject(projectId, {
-        newRequirements: requirementsContent
-      });
-      
-      logger.info(`Updated existing project: ${projectId}`);
+    
+    // Prepare the response
+    const response: Record<string, any> = {
+      success: true,
+      projectId: result.projectId,
+      isNewProject: result.isNewProject
+    };
+    
+    // Add deployment information if available
+    if (result.deploymentResult) {
+      response.deployment = {
+        url: result.deploymentResult.url,
+        id: result.deploymentResult.id,
+        status: result.deploymentResult.status
+      };
     }
-
-    return json({ 
-      success: true, 
-      message: 'Requirements received', 
-      projectId,
-      isNewProject
+    
+    logger.info('Successfully processed requirements', { 
+      projectId: result.projectId,
+      deployed: Boolean(result.deploymentResult)
     });
+    
+    return json(response);
   } catch (error) {
     logger.error('Error processing requirements:', error);
     return json(
@@ -116,6 +87,12 @@ export interface RequirementsResponseData {
   } | null;
   projectId: string | null;
   requirementsCount: number;
+  deployments?: Array<{
+    url: string;
+    provider: string;
+    timestamp: number;
+    status: 'success' | 'failed' | 'in-progress';
+  }>;
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -169,6 +146,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const sortedRequirements = [...requirementsHistory].sort((a, b) => b.timestamp - a.timestamp);
     const latestRequirement = sortedRequirements[0];
     
+    // Get project deployments if available
+    const project = await projectManager.getProject(projectId);
+    const deployments = project.deployments && project.deployments.length > 0 
+      ? project.deployments.map(d => ({
+          url: d.url,
+          provider: d.provider,
+          timestamp: d.timestamp,
+          status: d.status
+        }))
+      : undefined;
+    
     return json({
       hasRequirements: true,
       latestRequirements: {
@@ -176,7 +164,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
         timestamp: latestRequirement.timestamp
       },
       projectId,
-      requirementsCount: requirementsHistory.length
+      requirementsCount: requirementsHistory.length,
+      deployments
     } as RequirementsResponseData);
   } catch (error) {
     logger.error('Error retrieving requirements:', error);
