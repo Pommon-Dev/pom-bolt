@@ -15,22 +15,31 @@ export async function loader({ request }: LoaderFunctionArgs) {
   return json({});
 }
 
+type ActionError = { error: string; redirect?: never };
+type ActionRedirect = { redirect: string; error?: never };
+type ActionData = ActionError | ActionRedirect;
+
 export async function action({ request }: LoaderFunctionArgs) {
   const formData = await request.formData();
   const accessCode = formData.get('accessCode');
   
   if (!accessCode) {
-    return json({ error: 'Access code is required' }, { status: 400 });
+    return json<ActionError>({ error: 'Access code is required' }, { status: 400 });
   }
   
   // Redirect with access code
-  return json({ redirect: `/?code=${encodeURIComponent(accessCode.toString())}` });
+  return json<ActionRedirect>({ redirect: `/?code=${encodeURIComponent(accessCode.toString())}` });
 }
 
 export default function BetaAccess() {
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const { toast } = useToast();
+  
+  // Type guard function
+  const hasError = (data: any): data is ActionError => {
+    return data && 'error' in data;
+  };
   
   return (
     <div className="min-h-screen flex items-center justify-center bg-background">
@@ -58,7 +67,7 @@ export default function BetaAccess() {
           </Button>
         </Form>
         
-        {actionData?.error && (
+        {hasError(actionData) && (
           <p className="text-sm text-destructive text-center">
             {actionData.error}
           </p>
