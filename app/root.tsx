@@ -12,6 +12,9 @@ import { json } from '@remix-run/cloudflare';
 import type { LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { useLoaderData } from '@remix-run/react';
 import { loader as betaAuthLoader } from './middleware/beta-auth.server';
+import { environment, getEnvironmentInfo } from './lib/environment-setup';
+import type { EnvironmentInfo } from './lib/environments';
+import { EnvironmentIndicator } from './components/system/EnvironmentIndicator';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
 import globalStyles from './styles/index.scss?url';
@@ -78,6 +81,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   return (
     <DndProvider backend={HTML5Backend}>
       {children}
+      <EnvironmentIndicator />
       <ScrollRestoration />
       <Scripts />
     </DndProvider>
@@ -88,6 +92,13 @@ import { logStore } from './lib/stores/logs';
 
 interface BetaAuthResponse {
   authorized: boolean;
+  message?: string;
+  error?: string;
+}
+
+interface LoaderData {
+  environmentInfo?: EnvironmentInfo;
+  authorized?: boolean;
   message?: string;
   error?: string;
 }
@@ -104,12 +115,17 @@ export async function loader(args: LoaderFunctionArgs) {
     return betaAuthResponse;
   }
 
-  // Return empty data since we don't need additional data in the root loader
-  return json({});
+  // Return environment info alongside empty data
+  return json<LoaderData>({
+    environmentInfo: getEnvironmentInfo()
+  });
 }
 
 export default function App() {
   const theme = useStore(themeStore);
+  const data = useLoaderData<typeof loader>();
+  // Safely access environmentInfo
+  const environmentInfo = (data as LoaderData).environmentInfo;
 
   useEffect(() => {
     logStore.logSystem('Application initialized', {
@@ -117,8 +133,10 @@ export default function App() {
       platform: navigator.platform,
       userAgent: navigator.userAgent,
       timestamp: new Date().toISOString(),
+      environment: environmentInfo?.type,
+      isProduction: environmentInfo?.isProduction
     });
-  }, []);
+  }, [environmentInfo]);
 
   return (
     <Layout>
