@@ -16,10 +16,23 @@ pages_build_output_dir = "./build/client"
 # Enable metrics collection for monitoring
 send_metrics = true
 
-# Production environment configuration
-[env.production]
-vars = { ENVIRONMENT = "production", NODE_ENV = "production" }
+# KV Namespace - Standard way to define for Workers
+[[kv_namespaces]]
+binding = "POM_BOLT_PROJECTS"
+id = "dfe2d0d711d8469298b9ebe3c4d5f596"
 
-# Preview environment configuration (used for PR deployments)
+[env.production]
+# Define environment variables for production
+NODE_ENV = "production"
+ENVIRONMENT = "production"
+
+# Also define KV namespace binding for preview environment
 [env.preview]
-vars = { ENVIRONMENT = "preview", NODE_ENV = "development" }
+# Define environment variables for preview
+NODE_ENV = "production" 
+ENVIRONMENT = "preview"
+
+# Add KV binding to preview environment
+[[env.preview.kv_namespaces]]
+binding = "POM_BOLT_PROJECTS"
+id = "dfe2d0d711d8469298b9ebe3c4d5f596"

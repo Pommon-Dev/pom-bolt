@@ -12,7 +12,7 @@ import { json } from '@remix-run/cloudflare';
 import type { LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { useLoaderData } from '@remix-run/react';
 import { loader as betaAuthLoader } from './middleware/beta-auth.server';
-import { environment, getEnvironmentInfo } from './lib/environment-setup';
+import { environment, getEnvironmentInfo, initEnvironmentWithContext } from './lib/environment-setup';
 import type { EnvironmentInfo } from './lib/environments';
 import { EnvironmentIndicator } from './components/system/EnvironmentIndicator';
 
@@ -104,26 +104,30 @@ interface LoaderData {
 }
 
 export async function loader(args: LoaderFunctionArgs) {
+  // Initialize environment with context (important to do this first)
+  initEnvironmentWithContext(args.context);
+
   // Check beta access first
   const betaAuthResponse = await betaAuthLoader(args);
-  
+
   // Clone the response before reading it to avoid "Body already read" error
   const betaAuthClone = betaAuthResponse.clone();
-  const betaAuth = await betaAuthClone.json() as BetaAuthResponse;
-  
+  const betaAuth = (await betaAuthClone.json()) as BetaAuthResponse;
+
   if (!betaAuth.authorized) {
     return betaAuthResponse;
   }
 
   // Return environment info alongside empty data
   return json<LoaderData>({
-    environmentInfo: getEnvironmentInfo()
+    environmentInfo: getEnvironmentInfo(),
   });
 }
 
 export default function App() {
   const theme = useStore(themeStore);
   const data = useLoaderData<typeof loader>();
+
   // Safely access environmentInfo
   const environmentInfo = (data as LoaderData).environmentInfo;
 
@@ -134,7 +138,7 @@ export default function App() {
       userAgent: navigator.userAgent,
       timestamp: new Date().toISOString(),
       environment: environmentInfo?.type,
-      isProduction: environmentInfo?.isProduction
+      isProduction: environmentInfo?.isProduction,
     });
   }, [environmentInfo]);
 

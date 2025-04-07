@@ -668,7 +668,8 @@ const TaskManagerTab: React.FC = () => {
             limit: Math.round(totalMem),
           },
         },
-        uptime: typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() / 1000 : 0,
+        uptime:
+          typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() / 1000 : 0,
         battery: batteryInfo,
         network: networkInfo,
         performance: performanceMetrics as SystemMetrics['performance'],

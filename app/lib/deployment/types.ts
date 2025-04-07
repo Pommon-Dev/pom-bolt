@@ -73,6 +73,7 @@ export interface DeploymentStatus {
 export interface CloudflareConfig {
   accountId: string;                    // Cloudflare account ID
   apiToken: string;                     // Cloudflare API token
+  projectName?: string;                 // Optional fixed project name to deploy to
 }
 
 /**

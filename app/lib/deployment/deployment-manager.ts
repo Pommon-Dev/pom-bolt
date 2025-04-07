@@ -10,6 +10,7 @@ import type {
   CloudflareConfig
 } from './types';
 import { DeploymentErrorType } from './types';
+import { LocalZipTarget } from './targets/local-zip';
 
 const logger = createScopedLogger('deployment-manager');
 
@@ -38,29 +39,79 @@ export class DeploymentManager {
       'local-tunnel'
     ];
     
-    this.registerAvailableTargets(options);
+    // Initialize with basic targets synchronously
+    this.initializeBasicTargets(options);
+    
+    // Then attempt to register and validate cloud targets asynchronously
+    this.registerAvailableTargets(options).catch(error => {
+      logger.error('Error registering deployment targets:', error);
+    });
   }
   
   /**
-   * Register available deployment targets
+   * Initialize basic targets synchronously
    */
-  private registerAvailableTargets(options?: DeploymentManagerOptions): void {
+  private initializeBasicTargets(options?: DeploymentManagerOptions): void {
+    // Always register the local-zip target as a fallback
+    try {
+      const localZipTarget = new LocalZipTarget();
+      this.registerTarget('local-zip', localZipTarget);
+      logger.debug('Registered local-zip deployment target as fallback');
+    } catch (error) {
+      logger.error('Failed to register local-zip deployment target:', error);
+    }
+  }
+  
+  /**
+   * Register all available deployment targets based on the current environment
+   */
+  private async registerAvailableTargets(options?: DeploymentManagerOptions): Promise<void> {
     const environment = getEnvironment();
-    const envInfo = environment.getInfo();
     
-    logger.debug(`Registering deployment targets for environment: ${envInfo.type}`);
-    
-    // Register Cloudflare Pages target if config is provided
-    if (options?.cloudflareConfig) {
-      this.registerTarget(
-        'cloudflare-pages',
-        new CloudflarePagesTarget(options.cloudflareConfig)
-      );
+    // Get Cloudflare credentials
+    try {
+      // Check if credentials are provided in options first
+      let accountId = options?.cloudflareConfig?.accountId;
+      let apiToken = options?.cloudflareConfig?.apiToken;
+      let projectName = options?.cloudflareConfig?.projectName || 'genapps'; // Default to genapps
+      
+      // If not provided in options, get from environment
+      if (!accountId || !apiToken) {
+        accountId = environment.getEnvVariable('CLOUDFLARE_ACCOUNT_ID');
+        apiToken = environment.getEnvVariable('CLOUDFLARE_API_TOKEN');
+        
+        logger.debug('Attempting to retrieve Cloudflare credentials from environment');
+      }
+      
+      if (accountId && apiToken) {
+        logger.info(`Attempting to register Cloudflare Pages target with ${projectName} project`);
+        const cloudflareTarget = new CloudflarePagesTarget({
+          accountId,
+          apiToken,
+          projectName // Use the projectName (defaults to genapps)
+        });
+        
+        // Check if the target is actually available before registering
+        const isAvailable = await cloudflareTarget.isAvailable();
+        
+        if (isAvailable) {
+          this.registerTarget('cloudflare-pages', cloudflareTarget);
+          logger.info(`Successfully registered Cloudflare Pages deployment target with ${projectName} project`);
+        } else {
+          logger.warn('Cloudflare Pages deployment target configuration found but API validation failed');
+        }
+      } else {
+        logger.warn('Cloudflare Pages deployment target not registered - missing configuration', {
+          missingAccountId: !accountId,
+          missingApiToken: !apiToken
+        });
+      }
+    } catch (error) {
+      logger.error('Failed to register Cloudflare Pages deployment target:', error);
     }
     
-    // TODO: Register other targets as they are implemented
-    // this.registerTarget('vercel', new VercelTarget({}));
-    // this.registerTarget('netlify', new NetlifyTarget({}));
+    // Log which targets were registered
+    logger.info(`Registered deployment targets: ${this.getRegisteredTargets().join(', ')}`);
   }
   
   /**

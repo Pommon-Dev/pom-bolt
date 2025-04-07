@@ -43,6 +43,7 @@ export default class OpenAIProvider extends BaseProvider {
       }
 
       logger.debug('Fetching OpenAI models');
+
       const response = await fetch(`https://api.openai.com/v1/models`, {
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -86,6 +87,16 @@ export default class OpenAIProvider extends BaseProvider {
     try {
       const { model, serverEnv, apiKeys, providerSettings } = options;
 
+      // Log environment details for debugging
+      logger.debug('OpenAI provider environment details:', {
+        hasServerEnv: !!serverEnv,
+        serverEnvType: typeof serverEnv,
+        envKeys: serverEnv ? Object.keys(serverEnv as any).filter(k => !k.includes('key') && !k.includes('Key') && !k.includes('KEY')).join(',') : 'none',
+        hasApiKeys: !!apiKeys,
+        apiKeysProviders: apiKeys ? Object.keys(apiKeys).join(',') : 'none',
+        hasProviderSettings: !!providerSettings?.[this.name]
+      });
+
       const { apiKey } = this.getProviderBaseUrlAndKey({
         apiKeys,
         providerSettings: providerSettings?.[this.name],
@@ -95,16 +106,36 @@ export default class OpenAIProvider extends BaseProvider {
       });
 
       if (!apiKey) {
-        logger.error('Missing API key for OpenAI provider when creating model instance');
+        // Try one more direct access attempt for Cloudflare environment
+        const directKey = 
+          serverEnv?.OPENAI_API_KEY || 
+          (serverEnv as any)?.env?.OPENAI_API_KEY || 
+          (serverEnv as any)?.cloudflare?.env?.OPENAI_API_KEY;
+        
+        if (directKey) {
+          logger.info('Retrieved OpenAI API key through direct access');
+          
+          // Create OpenAI instance with the direct key
+          const openai = createOpenAI({
+            apiKey: directKey,
+          });
+          
+          return openai(model);
+        }
+        
+        logger.error('Missing API key for OpenAI provider when creating model instance', {
+          keyVarChecked: 'OPENAI_API_KEY',
+          directAccessAttempted: true
+        });
         throw new Error(`Missing API key for ${this.name} provider`);
       }
 
       // Log API key length and first/last few characters for debugging
-      logger.debug('Creating OpenAI model instance', { 
-        model, 
+      logger.debug('Creating OpenAI model instance', {
+        model,
         apiKeyLength: apiKey.length,
         apiKeyPrefix: apiKey.substring(0, 3) + '...',
-        apiKeySuffix: '...' + apiKey.substring(apiKey.length - 3)
+        apiKeySuffix: '...' + apiKey.substring(apiKey.length - 3),
       });
 
       const openai = createOpenAI({
@@ -113,7 +144,10 @@ export default class OpenAIProvider extends BaseProvider {
 
       return openai(model);
     } catch (error) {
-      logger.error('Error creating OpenAI model instance', { error: error instanceof Error ? error.message : String(error) });
+      logger.error('Error creating OpenAI model instance', {
+        error: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : undefined
+      });
       throw error; // Re-throw to allow proper error handling
     }
   }

@@ -1,5 +1,5 @@
 /**
- * Base environment interface that defines common operations 
+ * Base environment interface that defines common operations
  * that should work consistently across different environments
  * (local, Cloudflare Pages, containers, etc.)
  */
@@ -16,7 +16,7 @@ export enum EnvironmentType {
   CLOUDFLARE = 'cloudflare',
   CONTAINER = 'container',
   NETLIFY = 'netlify',
-  UNKNOWN = 'unknown'
+  UNKNOWN = 'unknown',
 }
 
 export enum StorageType {
@@ -24,7 +24,7 @@ export enum StorageType {
   SESSION_STORAGE = 'session_storage',
   CLOUDFLARE_KV = 'cloudflare_kv',
   CLOUDFLARE_D1 = 'cloudflare_d1',
-  MEMORY = 'memory'
+  MEMORY = 'memory',
 }
 
 /**
@@ -104,4 +104,91 @@ export interface Environment {
    * (useful for tracking deployments, projects, etc.)
    */
   createUniqueId(): string;
-} 
+}
+
+/**
+ * Base implementation of the Environment interface with memory storage
+ */
+export abstract class BaseEnvironment implements Environment {
+  protected _inMemoryStorage: Map<string, any> = new Map();
+  
+  // Abstract methods that must be implemented by subclasses
+  abstract getInfo(): EnvironmentInfo;
+  abstract hasEnvVariable(key: string): boolean;
+  abstract getEnvVariable<T = string>(key: string, defaultValue?: T): T | undefined;
+  abstract canExecuteCommands(): boolean;
+  abstract hasFilesystemAccess(): boolean;
+  
+  /**
+   * Get a temporary directory path
+   */
+  getTempDirectoryPath(): string | null {
+    throw new Error('File system access not supported in this environment');
+  }
+  
+  /**
+   * Create a unique ID
+   */
+  createUniqueId(): string {
+    return crypto.randomUUID();
+  }
+  
+  /**
+   * Get available storage types
+   * Default implementation only provides memory
+   */
+  getAvailableStorageTypes(): StorageType[] {
+    return [StorageType.MEMORY];
+  }
+  
+  /**
+   * Check if a specific storage type is available
+   */
+  isStorageAvailable(type: StorageType): boolean {
+    return this.getAvailableStorageTypes().includes(type);
+  }
+  
+  /**
+   * Store a value in memory
+   */
+  async storeValue(storageType: StorageType, key: string, value: any): Promise<void> {
+    if (storageType !== StorageType.MEMORY) {
+      throw new Error(`Storage type ${storageType} is not supported in base environment`);
+    }
+    
+    this._inMemoryStorage.set(key, value);
+  }
+  
+  /**
+   * Retrieve a value from memory
+   */
+  async retrieveValue<T = any>(storageType: StorageType, key: string): Promise<T | null> {
+    if (storageType !== StorageType.MEMORY) {
+      throw new Error(`Storage type ${storageType} is not supported in base environment`);
+    }
+    
+    return this._inMemoryStorage.get(key) || null;
+  }
+  
+  /**
+   * Remove a value from memory
+   */
+  async removeValue(storageType: StorageType, key: string): Promise<void> {
+    if (storageType !== StorageType.MEMORY) {
+      throw new Error(`Storage type ${storageType} is not supported in base environment`);
+    }
+    
+    this._inMemoryStorage.delete(key);
+  }
+  
+  /**
+   * List all keys with a specific prefix
+   */
+  async listKeys(storageType: StorageType, prefix: string): Promise<string[]> {
+    if (storageType !== StorageType.MEMORY) {
+      throw new Error(`Storage type ${storageType} is not supported in base environment`);
+    }
+    
+    return Array.from(this._inMemoryStorage.keys()).filter(key => key.startsWith(prefix));
+  }
+}

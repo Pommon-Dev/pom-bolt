@@ -1,10 +1,10 @@
 /**
  * FileSystem Adapter
- * 
+ *
  * This adapter provides a unified interface for filesystem operations across different
  * environments (browser and Cloudflare Pages). It handles the differences between
  * WebContainer's filesystem in the browser and Cloudflare's storage in production.
- * 
+ *
  * Usage:
  * ```typescript
  * const fs = new FileSystemAdapter();
@@ -26,7 +26,7 @@ export class FileSystemAdapter {
   constructor() {
     // Detect if we're running in Cloudflare Pages environment
     this.isCloudflare = environment.isCloudflare;
-    
+
     if (this.isCloudflare) {
       logger.info('Initializing FileSystemAdapter in Cloudflare environment');
     }
@@ -53,10 +53,13 @@ export class FileSystemAdapter {
       // In Cloudflare, fetch from our storage API
       try {
         logger.debug(`Reading file from Cloudflare storage: ${path}`);
+
         const response = await fetch(`/api/fs/${encodeURIComponent(path)}`);
+
         if (!response.ok) {
           throw new Error(`Failed to read file: ${path}`);
         }
+
         return await response.text();
       } catch (error) {
         logger.error(`Error reading file from Cloudflare storage: ${path}`, { error });
@@ -68,7 +71,9 @@ export class FileSystemAdapter {
     if (this.webcontainer) {
       try {
         logger.debug(`Reading file from WebContainer: ${path}`);
+
         const file = await this.webcontainer.fs.readFile(path, 'utf-8');
+
         return file;
       } catch (error) {
         logger.error(`Error reading file from WebContainer: ${path}`, { error });
@@ -123,7 +128,9 @@ export class FileSystemAdapter {
     if (this.isCloudflare) {
       try {
         logger.debug(`Checking if file exists in Cloudflare storage: ${path}`);
+
         const response = await fetch(`/api/fs/${encodeURIComponent(path)}/exists`);
+
         return response.ok;
       } catch (error) {
         logger.error(`Error checking file existence in Cloudflare storage: ${path}`, { error });
@@ -134,6 +141,7 @@ export class FileSystemAdapter {
     if (this.webcontainer) {
       try {
         logger.debug(`Checking if file exists in WebContainer: ${path}`);
+
         // Use try-catch with stat API
         try {
           // Access the internal fs stat method, wrapped in try/catch since it might not be publicly typed
@@ -164,6 +172,7 @@ export class FileSystemAdapter {
     // In Cloudflare, return a dummy watcher that does nothing
     if (this.isCloudflare) {
       logger.warn(`File watching not supported in Cloudflare environment: ${path}`);
+
       // Return a dummy watcher object that does nothing
       return {
         addEventListener: (event: string, callback: () => void) => {
@@ -171,7 +180,7 @@ export class FileSystemAdapter {
         },
         close: () => {
           logger.debug('Dummy watcher close called');
-        }
+        },
       };
     }
 
@@ -188,4 +197,4 @@ export class FileSystemAdapter {
 
     return null;
   }
-} 
+}

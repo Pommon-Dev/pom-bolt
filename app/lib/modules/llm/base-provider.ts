@@ -45,8 +45,38 @@ export abstract class BaseProvider implements ProviderInfo {
     }
 
     const apiTokenKey = this.config.apiTokenKey || defaultApiTokenKey;
-    const apiKey =
-      apiKeys?.[this.name] || serverEnv?.[apiTokenKey] || process?.env?.[apiTokenKey] || manager.env?.[apiTokenKey];
+    
+    // Enhanced API key lookup with more direct access attempts for Cloudflare environment
+    // First check if API key is directly provided through apiKeys
+    let apiKey = apiKeys?.[this.name];
+    
+    // If not found, try various environment sources
+    if (!apiKey) {
+      // Check all possible environment variable formats
+      apiKey = serverEnv?.[apiTokenKey] || 
+               // Try plain environment variable
+               serverEnv?.[apiTokenKey.toUpperCase()] ||
+               // Try Cloudflare environment structure
+               (serverEnv as any)?.env?.[apiTokenKey.toUpperCase()] ||
+               // Try process.env
+               process?.env?.[apiTokenKey] ||
+               process?.env?.[apiTokenKey.toUpperCase()] ||
+               // Try manager.env
+               manager.env?.[apiTokenKey] ||
+               manager.env?.[apiTokenKey.toUpperCase()];
+      
+      // Debug logging for API key resolution
+      console.log(`[BaseProvider] API key resolution for ${this.name}:`, {
+        provider: this.name,
+        apiTokenKey,
+        apiKeyFound: !!apiKey,
+        hasServerEnv: !!serverEnv,
+        serverEnvType: typeof serverEnv,
+        hasTokenInEnv: serverEnv ? apiTokenKey in (serverEnv as any) : false,
+        hasUppercaseToken: serverEnv ? apiTokenKey.toUpperCase() in (serverEnv as any) : false,
+        hasNestedEnv: serverEnv && typeof serverEnv === 'object' ? 'env' in (serverEnv as any) : false
+      });
+    }
 
     return {
       baseUrl,

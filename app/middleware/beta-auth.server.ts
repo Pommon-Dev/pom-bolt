@@ -18,20 +18,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (accessCode && BETA_ACCESS_CODES.includes(accessCode)) {
     // Set cookie for future access
     const headers = new Headers();
-    headers.append(
-      'Set-Cookie',
-      `${BETA_COOKIE_NAME}=${accessCode}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`
-    );
+    headers.append('Set-Cookie', `${BETA_COOKIE_NAME}=${accessCode}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`);
+
     return json({ authorized: true }, { headers });
   }
 
   // Return unauthorized
   return json(
-    { 
-      authorized: false, 
+    {
+      authorized: false,
       message: 'Beta access required. Please contact support for access.',
-      error: 'unauthorized'
+      error: 'unauthorized',
     },
-    { status: 403 }
+    { status: 403 },
   );
-} 
+}

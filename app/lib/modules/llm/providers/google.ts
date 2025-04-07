@@ -51,6 +51,7 @@ export default class GoogleProvider extends BaseProvider {
       }
 
       logger.debug('Fetching Google Gemini models');
+
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, {
         headers: {
           ['Content-Type']: 'application/json',
@@ -73,6 +74,7 @@ export default class GoogleProvider extends BaseProvider {
       const data = res.models.filter((model: any) => model.outputTokenLimit > 8000);
 
       logger.debug(`Found ${data.length} Google Gemini models with high token limits`);
+
       return data.map((m: any) => ({
         name: m.name.replace('models/', ''),
         label: `${m.displayName} - context ${Math.floor((m.inputTokenLimit + m.outputTokenLimit) / 1000) + 'k'}`,
@@ -108,11 +110,11 @@ export default class GoogleProvider extends BaseProvider {
       }
 
       // Log API key length and first/last few characters for debugging
-      logger.debug('Creating Google Gemini model instance', { 
-        model, 
+      logger.debug('Creating Google Gemini model instance', {
+        model,
         apiKeyLength: apiKey.length,
         apiKeyPrefix: apiKey.substring(0, 3) + '...',
-        apiKeySuffix: '...' + apiKey.substring(apiKey.length - 3)
+        apiKeySuffix: '...' + apiKey.substring(apiKey.length - 3),
       });
 
       const google = createGoogleGenerativeAI({
@@ -121,7 +123,9 @@ export default class GoogleProvider extends BaseProvider {
 
       return google(model);
     } catch (error) {
-      logger.error('Error creating Google Gemini model instance', { error: error instanceof Error ? error.message : String(error) });
+      logger.error('Error creating Google Gemini model instance', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error; // Re-throw to allow proper error handling
     }
   }

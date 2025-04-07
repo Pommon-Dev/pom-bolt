@@ -1,180 +1,147 @@
-import { json } from '@remix-run/node';
-import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/node';
+import { json } from '@remix-run/cloudflare';
+import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
-import { getProjectStateManager } from '~/lib/projects';
-import { runRequirementsChain } from '~/lib/middleware/requirements-chain';
-import { handleProjectContext } from '~/lib/middleware/project-context';
+import { runRequirementsChain, loadProjectContext, processRequirements, type RequirementsContext } from '~/lib/middleware/requirements-chain';
 
 const logger = createScopedLogger('api-requirements');
 
-// Define interface for the request body
-interface RequirementsRequestBody {
-  content?: string;
-  requirements?: string;
-  projectId?: string;
-  userId?: string;
-  deploy?: boolean;
-  deployment?: {
-    platform?: string;
-    settings?: Record<string, any>;
-  };
-  deploymentTarget?: string;
-  deploymentOptions?: Record<string, any>;
+/**
+ * GET handler for requirements API
+ */
+export async function loader({ request }: LoaderFunctionArgs) {
+  // Return a simple status message
+  return json({
+    status: 'Requirements API is available',
+    method: 'POST',
+    description: 'Submit requirements to generate code and create/update a project',
+    schema: {
+      content: 'string (required) - Project requirements text',
+      deploy: 'boolean (optional) - Whether to deploy the generated code',
+      deploymentTarget: 'string (optional) - Deployment target platform',
+      projectId: 'string (optional) - Existing project ID to update'
+    }
+  });
 }
 
-export async function action({ request }: ActionFunctionArgs) {
-  if (request.method !== 'POST') {
-    return json({ error: 'Method not allowed' }, { status: 405 });
-  }
-
+/**
+ * API endpoint for handling requirements processing
+ * POST /api/requirements - Process requirements and generate code/project
+ */
+export async function action({ request, context }: ActionFunctionArgs) {
   try {
-    // Use the new middleware chain to process the request
-    const result = await runRequirementsChain(request);
+    logger.info('Processing requirements request');
     
-    // Handle any errors that occurred during processing
-    if (result.error) {
-      logger.error('Error processing requirements:', result.error);
-      return json(
-        {
-          error: 'Failed to process requirements',
-          message: result.error.message,
-          details: result.error.stack
-        },
-        { status: 500 }
-      );
-    }
-    
-    // Prepare the response
-    const response: Record<string, any> = {
-      success: true,
-      projectId: result.projectId,
-      isNewProject: result.isNewProject
-    };
-    
-    // Add deployment information if available
-    if (result.deploymentResult) {
-      response.deployment = {
-        url: result.deploymentResult.url,
-        id: result.deploymentResult.id,
-        status: result.deploymentResult.status
-      };
-    }
-    
-    logger.info('Successfully processed requirements', { 
-      projectId: result.projectId,
-      deployed: Boolean(result.deploymentResult)
+    // Debug: Log request information and context
+    logger.debug('Request headers:', {
+      contentType: request.headers.get('Content-Type'),
+      contentLength: request.headers.get('Content-Length'),
+      accept: request.headers.get('Accept')
     });
     
-    return json(response);
+    logger.debug('Context information:', {
+      hasContext: !!context,
+      contextType: typeof context,
+      contextKeys: context ? Object.keys(context as any).join(',') : 'none',
+      hasEnv: !!(context as any)?.env,
+      envType: (context as any)?.env ? typeof (context as any).env : 'undefined'
+    });
+    
+    // Manually parse the request body
+    let reqBody;
+    try {
+      const clonedRequest = request.clone();
+      const rawBody = await clonedRequest.text();
+      logger.debug('Raw request body:', { 
+        length: rawBody.length,
+        preview: rawBody.substring(0, 100),
+        isJson: rawBody.trim().startsWith('{')
+      });
+      
+      // Try parsing JSON directly
+      if (rawBody.trim().startsWith('{')) {
+        try {
+          reqBody = JSON.parse(rawBody);
+          logger.debug('Parsed JSON body directly:', {
+            hasContent: Boolean(reqBody.content || reqBody.requirements),
+            contentType: reqBody.content ? 'content' : reqBody.requirements ? 'requirements' : 'none',
+            keys: Object.keys(reqBody)
+          });
+        } catch (jsonError) {
+          logger.error('Failed to parse JSON directly:', jsonError);
+          // Use the raw body as content if JSON parse fails
+          reqBody = { content: rawBody };
+        }
+      } else {
+        // Use the raw body as content
+        reqBody = { content: rawBody };
+      }
+    } catch (bodyError) {
+      logger.error('Failed to read raw request body:', bodyError);
+      return json({ 
+        success: false, 
+        error: 'Failed to read request body' 
+      }, { status: 400 });
+    }
+    
+    // Create initial requirements context with parsed body
+    const reqContext: RequirementsContext = {
+      content: reqBody.content || reqBody.requirements || '',
+      projectId: reqBody.projectId || reqBody.id || '',
+      isNewProject: !reqBody.projectId && !reqBody.id,
+      userId: reqBody.userId,
+      shouldDeploy: Boolean(reqBody.deploy || reqBody.deployment || reqBody.deployTarget),
+      deploymentTarget: reqBody.deployTarget || reqBody.deploymentTarget,
+      files: {},
+      env: (context as any) || {} // Pass the entire context to ensure KV bindings work
+    };
+    
+    // If Cloudflare context has env, add it to the requirements context
+    if ((context as any)?.env) {
+      reqContext.env = (context as any).env;
+    }
+    
+    logger.debug('Initial request context:', {
+      hasContent: Boolean(reqContext.content),
+      contentLength: reqContext.content ? reqContext.content.length : 0,
+      projectId: reqContext.projectId || '(none)',
+      isNewProject: reqContext.isNewProject,
+      hasEnv: !!reqContext.env,
+      shouldDeploy: reqContext.shouldDeploy,
+      deploymentTarget: reqContext.deploymentTarget
+    });
+    
+    // Load project context to handle project identification
+    // Pass the manually parsed body to avoid parsing issues
+    const projectContext = await loadProjectContext(reqContext, request);
+    
+    // Ensure we pass the context to the project context
+    projectContext.env = reqContext.env;
+    
+    logger.debug('Project context after loading:', {
+      projectId: projectContext.projectId,
+      isNewProject: projectContext.isNewProject,
+      hasEnv: !!projectContext.env
+    });
+    
+    // Process the requirements and generate code
+    const result = await processRequirements(projectContext, request);
+    
+    // Return the result
+    return json({
+      success: true,
+      projectId: result.projectId,
+      isNewProject: result.isNewProject,
+      filesGenerated: result.files ? Object.keys(result.files).length : 0,
+      deployment: result.deploymentResult,
+      archive: result.archiveKey ? { key: result.archiveKey } : undefined,
+      error: result.error ? result.error.message : undefined
+    });
   } catch (error) {
     logger.error('Error processing requirements:', error);
-    return json(
-      {
-        error: 'Failed to process requirements',
-        details: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 },
-    );
-  }
-}
-
-// Define interface for response data
-export interface RequirementsResponseData {
-  hasRequirements: boolean;
-  latestRequirements: {
-    content: string;
-    timestamp: number;
-  } | null;
-  projectId: string | null;
-  requirementsCount: number;
-  deployments?: Array<{
-    url: string;
-    provider: string;
-    timestamp: number;
-    status: 'success' | 'failed' | 'in-progress';
-  }>;
-}
-
-export async function loader({ request }: LoaderFunctionArgs) {
-  // Only allow GET requests
-  if (request.method !== 'GET') {
-    return json({ error: 'Method not allowed' }, { status: 405 });
-  }
-
-  try {
-    // Check if a project ID was provided in the query params
-    const url = new URL(request.url);
-    const projectId = url.searchParams.get('projectId');
-    
-    if (!projectId) {
-      return json({
-        hasRequirements: false,
-        latestRequirements: null,
-        projectId: null,
-        requirementsCount: 0
-      } as RequirementsResponseData);
-    }
-    
-    // Get the project state manager
-    const projectManager = getProjectStateManager();
-    
-    // Check if the project exists
-    const exists = await projectManager.projectExists(projectId);
-    if (!exists) {
-      return json({
-        hasRequirements: false,
-        latestRequirements: null,
-        projectId,
-        requirementsCount: 0
-      } as RequirementsResponseData);
-    }
-    
-    // Get the requirements history
-    const requirementsHistory = await projectManager.getRequirementsHistory(projectId);
-    
-    // No requirements
-    if (requirementsHistory.length === 0) {
-      return json({
-        hasRequirements: false,
-        latestRequirements: null,
-        projectId,
-        requirementsCount: 0
-      } as RequirementsResponseData);
-    }
-    
-    // Sort requirements by timestamp (newest first)
-    const sortedRequirements = [...requirementsHistory].sort((a, b) => b.timestamp - a.timestamp);
-    const latestRequirement = sortedRequirements[0];
-    
-    // Get project deployments if available
-    const project = await projectManager.getProject(projectId);
-    const deployments = project.deployments && project.deployments.length > 0 
-      ? project.deployments.map(d => ({
-          url: d.url,
-          provider: d.provider,
-          timestamp: d.timestamp,
-          status: d.status
-        }))
-      : undefined;
-    
     return json({
-      hasRequirements: true,
-      latestRequirements: {
-        content: latestRequirement.content,
-        timestamp: latestRequirement.timestamp
-      },
-      projectId,
-      requirementsCount: requirementsHistory.length,
-      deployments
-    } as RequirementsResponseData);
-  } catch (error) {
-    logger.error('Error retrieving requirements:', error);
-    return json(
-      {
-        error: 'Failed to retrieve requirements',
-        details: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 },
-    );
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error processing requirements',
+      stack: error instanceof Error ? error.stack : undefined
+    }, { status: 500 });
   }
 }

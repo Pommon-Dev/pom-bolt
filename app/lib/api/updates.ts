@@ -52,12 +52,14 @@ export const checkForUpdates = async (): Promise<UpdateCheckResult> => {
 
         if (packageResponse.ok) {
           const packageData = (await packageResponse.json()) as PackageJson;
+
           if (packageData.version && typeof packageData.version === 'string') {
             currentVersion = packageData.version;
           }
         }
       } catch (error) {
         console.warn('Could not access local package.json, using fallback version');
+
         // Continue with fallback version
       }
     }

@@ -27,6 +27,22 @@ export class LLMManager {
     return this._env;
   }
 
+  /**
+   * Update environment variables in the LLM manager
+   * Useful for adding or replacing environment variables after initialization
+   */
+  setEnv(env: Record<string, any>): void {
+    if (!env) return;
+    
+    // Merge the new environment variables with the existing ones
+    Object.assign(this._env, env);
+    
+    logger.debug('Updated environment variables', {
+      envKeysCount: Object.keys(this._env).length,
+      newEnvKeysCount: Object.keys(env).length
+    });
+  }
+
   private async _registerProvidersFromDirectory() {
     try {
       /*

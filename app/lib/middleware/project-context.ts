@@ -44,10 +44,56 @@ export interface ProjectContextOptions {
  */
 export async function handleProjectContext(
   request: Request,
-  options: ProjectContextOptions = {}
+  options: ProjectContextOptions = {},
+  parsedBody?: RequestBody
 ): Promise<ProjectRequestContext> {
-  // Parse the request body
-  const data = await request.clone().json() as RequestBody;
+  // Parse the request body if not provided
+  let data: RequestBody;
+  
+  if (parsedBody) {
+    data = parsedBody;
+  } else {
+    try {
+      // First try JSON parsing
+      try {
+        data = await request.clone().json() as RequestBody;
+        logger.debug('Successfully parsed JSON body', { 
+          keys: Object.keys(data),
+          hasRequirements: Boolean(data.content || data.requirements)
+        });
+      } catch (jsonError) {
+        logger.error('Failed standard JSON parsing:', jsonError);
+        
+        // Try text fallback
+        try {
+          const textBody = await request.clone().text();
+          logger.debug('Raw request body', {
+            length: textBody.length,
+            preview: textBody.substring(0, 100)
+          });
+          
+          // Try to manually parse JSON
+          try {
+            data = JSON.parse(textBody) as RequestBody;
+            logger.debug('Manually parsed JSON body', {
+              keys: Object.keys(data)
+            });
+          } catch (parseError) {
+            logger.error('Failed to manually parse JSON', parseError);
+            // If it's not JSON, use as-is
+            data = { content: textBody } as RequestBody;
+          }
+        } catch (textError) {
+          logger.error('Failed to parse request body:', textError);
+          throw new Error('Failed to parse request body');
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to parse request body:', error);
+      throw new Error('Failed to parse request body');
+    }
+  }
+  
   const projectId = data.projectId || data.id;
   const requirements = data.content || data.requirements;
   const userId = data.userId;

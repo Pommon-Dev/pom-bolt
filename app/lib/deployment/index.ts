@@ -1,24 +1,17 @@
-// Export types
-export * from './types';
+import { DeploymentManager } from './deployment-manager';
 
-// Export base interfaces
-export * from './targets/base';
-export * from './packagers/base';
+// Singleton instance of the DeploymentManager
+let deploymentManagerInstance: DeploymentManager | null = null;
 
-// Export deployment targets
-export { CloudflarePagesTarget } from './targets/cloudflare-pages';
+/**
+ * Get or create the deployment manager singleton
+ */
+export function getDeploymentManager(options?: any) {
+  if (!deploymentManagerInstance) {
+    deploymentManagerInstance = new DeploymentManager(options);
+  }
+  return deploymentManagerInstance;
+}
 
-// Export packagers
-export { ZipPackager } from './packagers/zip';
-
-// Export the deployment manager
-export { 
-  DeploymentManager,
-  getDeploymentManager,
-  resetDeploymentManager,
-  type DeploymentManagerOptions
-} from './deployment-manager';
-
-// Default export is the singleton deployment manager
-import { getDeploymentManager } from './deployment-manager';
+// For backward compatibility
 export default getDeploymentManager; 

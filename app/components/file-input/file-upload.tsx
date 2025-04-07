@@ -30,6 +30,7 @@ export function FileUpload({ onSendMessage }: FileUploadProps) {
       try {
         // Add more detailed logging for troubleshooting in Cloudflare
         logger.debug('Polling for webhook requirements');
+
         const response = await fetch('/api/requirements');
 
         if (!response.ok) {
@@ -59,13 +60,13 @@ export function FileUpload({ onSendMessage }: FileUploadProps) {
         }
       } catch (error) {
         // Enhanced error logging with more context
-        logger.error('Error checking for webhook requirements', { 
+        logger.error('Error checking for webhook requirements', {
           error: error instanceof Error ? error.message : String(error),
           stack: error instanceof Error ? error.stack : undefined,
           isPolling: polling,
-          isLoading
+          isLoading,
         });
-        
+
         // Don't let one error stop the polling - continue in next interval
       }
     };
@@ -76,8 +77,8 @@ export function FileUpload({ onSendMessage }: FileUploadProps) {
         pollingInterval = setInterval(checkForWebhookRequirements, 3000);
         logger.debug('Started polling for webhook requirements');
       } catch (error) {
-        logger.error('Failed to set up webhook polling interval', { 
-          error: error instanceof Error ? error.message : String(error) 
+        logger.error('Failed to set up webhook polling interval', {
+          error: error instanceof Error ? error.message : String(error),
         });
       }
     }

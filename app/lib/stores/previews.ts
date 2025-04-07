@@ -37,7 +37,7 @@ export class PreviewsStore {
 
   constructor(webcontainerPromise: Promise<WebContainer>) {
     this.#webcontainer = webcontainerPromise;
-    
+
     // Only create broadcast channels if we're in a browser environment
     if (typeof window !== 'undefined') {
       this.#broadcastChannel = new BroadcastChannel(PREVIEW_CHANNEL);
@@ -157,8 +157,9 @@ export class PreviewsStore {
     }
 
     this.isInitialized = true;
+
     const adapter = new FileSystemAdapter();
-    
+
     try {
       const webcontainer = await this.#webcontainer;
 

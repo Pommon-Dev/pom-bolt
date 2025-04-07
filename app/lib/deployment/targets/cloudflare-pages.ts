@@ -21,11 +21,17 @@ const logger = createScopedLogger('cloudflare-pages-target');
 export class CloudflarePagesTarget extends BaseDeploymentTarget {
   private config: CloudflareConfig;
   private zipPackager: ZipPackager;
+  private fixedProjectName?: string;
   
   constructor(config: CloudflareConfig) {
     super();
     this.config = config;
     this.zipPackager = new ZipPackager();
+    this.fixedProjectName = config.projectName;
+    
+    if (this.fixedProjectName) {
+      logger.info(`CloudflarePagesTarget initialized with fixed project name: ${this.fixedProjectName}`);
+    }
   }
   
   getName(): string {
@@ -86,7 +92,11 @@ export class CloudflarePagesTarget extends BaseDeploymentTarget {
   }
   
   async initializeProject(options: ProjectOptions): Promise<ProjectMetadata> {
-    const sanitizedName = this.sanitizeProjectName(options.name);
+    // If we have a fixed project name, use it instead of the provided name
+    const projectName = this.fixedProjectName || options.name;
+    const sanitizedName = this.sanitizeProjectName(projectName);
+    
+    logger.debug(`Initializing Cloudflare Pages project: ${sanitizedName} ${this.fixedProjectName ? '(using fixed project name)' : ''}`);
     
     try {
       // Check if project already exists
@@ -145,14 +155,17 @@ export class CloudflarePagesTarget extends BaseDeploymentTarget {
   }
   
   async deploy(options: DeployOptions): Promise<DeploymentResult> {
+    // If we have a fixed project name, use it instead of the provided name
+    const projectName = this.fixedProjectName || options.projectName;
+    
     try {
       // Package the files
-      logger.debug(`Packaging ${Object.keys(options.files).length} files for deployment`);
+      logger.debug(`Packaging ${Object.keys(options.files).length} files for deployment to ${projectName} ${this.fixedProjectName ? '(using fixed project name)' : ''}`);
       const zipBuffer = await this.zipPackager.package(options.files);
       
       // Get a direct upload URL
-      logger.debug(`Getting upload URL for project ${options.projectName}`);
-      const deploymentData = await this.createDeployment(options.projectName);
+      logger.debug(`Getting upload URL for project ${projectName}`);
+      const deploymentData = await this.createDeployment(projectName);
       const { id: deploymentId, url: uploadUrl } = deploymentData;
       
       // Upload the files
@@ -161,9 +174,9 @@ export class CloudflarePagesTarget extends BaseDeploymentTarget {
       
       // Wait for the deployment to complete
       logger.info(`Deployment ${deploymentId} in progress, waiting for completion`);
-      const status = await this.waitForDeployment(options.projectName, deploymentId);
+      const status = await this.waitForDeployment(projectName, deploymentId);
       
-      const deploymentUrl = status.url || `https://${deploymentId}.${options.projectName}.pages.dev`;
+      const deploymentUrl = status.url || `https://${deploymentId}.${projectName}.pages.dev`;
       
       return {
         id: deploymentId,
@@ -172,12 +185,12 @@ export class CloudflarePagesTarget extends BaseDeploymentTarget {
         logs: status.logs,
         provider: this.getProviderType(),
         metadata: {
-          projectName: options.projectName,
+          projectName: projectName,
           createdAt: Date.now()
         }
       };
     } catch (error) {
-      logger.error(`Deployment failed for project ${options.projectName}:`, error);
+      logger.error(`Deployment failed for project ${projectName}:`, error);
       throw this.createError(
         DeploymentErrorType.DEPLOYMENT_FAILED,
         `Failed to deploy to Cloudflare Pages: ${error instanceof Error ? error.message : 'Unknown error'}`,

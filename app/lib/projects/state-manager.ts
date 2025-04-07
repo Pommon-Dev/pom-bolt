@@ -340,6 +340,38 @@ export class ProjectStateManager {
     
     return [...result.newFiles, ...result.updatedFiles];
   }
+  
+  /**
+   * Add requirements to an existing project
+   */
+  async addRequirements(
+    projectId: string,
+    content: string,
+    userId?: string
+  ): Promise<RequirementsEntry> {
+    logger.debug(`Adding requirements to project: ${projectId}`);
+    
+    // Get the project
+    const project = await this.getProject(projectId);
+    
+    // Create a new requirements entry
+    const requirementsEntry: RequirementsEntry = {
+      id: uuidv4(),
+      content,
+      timestamp: Date.now(),
+      userId
+    };
+    
+    // Add it to the project
+    project.requirements.push(requirementsEntry);
+    project.updatedAt = Date.now();
+    
+    // Save the updated project
+    await this.storageAdapter.saveProject(project);
+    
+    logger.info(`Added requirements entry to project ${projectId}`);
+    return requirementsEntry;
+  }
 }
 
 // Export a singleton instance for convenience
