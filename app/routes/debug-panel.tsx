@@ -3,18 +3,18 @@ import React from 'react';
 export default function DebugPanel() {
   // Define functions to handle button clicks
   function testCredentials() {
-    // This function is defined in the script tag
-    // TypeScript doesn't know about it, but it will be available at runtime
     (window as any).testCredentials();
   }
 
-  function testDeployment() {
-    // This function is defined in the script tag
-    (window as any).testDeployment();
+  function testNetlifyDeployment() {
+    (window as any).testNetlifyDeployment();
+  }
+
+  function testCloudflareDeployment() {
+    (window as any).testCloudflareDeployment();
   }
 
   function checkTargets() {
-    // This function is defined in the script tag
     (window as any).checkTargets();
   }
 
@@ -22,74 +22,48 @@ export default function DebugPanel() {
     <div className="p-6 max-w-4xl mx-auto">
       <h1 className="text-2xl font-bold mb-6">Deployment Debug Panel</h1>
       
+      {/* --- Cloudflare Credentials Section --- */}
       <div className="mb-8 p-4 border rounded">
-        <h2 className="text-xl font-semibold mb-4">Test Cloudflare Credentials</h2>
-        <div className="mb-4">
-          <p>Enter your Cloudflare credentials to test target creation:</p>
-        </div>
-        
+        <h2 className="text-xl font-semibold mb-4">Cloudflare Credentials</h2>
         <div className="grid gap-4 mb-4">
           <div>
             <label className="block mb-1">Account ID:</label>
-            <input
-              type="text"
-              id="accountId"
-              className="w-full p-2 border rounded"
-              placeholder="Enter Cloudflare Account ID"
-            />
+            <input type="text" id="cfAccountId" className="w-full p-2 border rounded" placeholder="Enter Cloudflare Account ID" />
           </div>
-          
           <div>
             <label className="block mb-1">API Token:</label>
-            <input
-              type="password"
-              id="apiToken"
-              className="w-full p-2 border rounded"
-              placeholder="Enter Cloudflare API Token"
-            />
+            <input type="password" id="cfApiToken" className="w-full p-2 border rounded" placeholder="Enter Cloudflare API Token" />
           </div>
-          
           <div>
             <label className="block mb-1">Project Name:</label>
-            <input
-              type="text"
-              id="projectName"
-              className="w-full p-2 border rounded"
-              placeholder="Project name (default: genapps)"
-              defaultValue="genapps"
-            />
+            <input type="text" id="cfProjectName" className="w-full p-2 border rounded" placeholder="CF project (default: genapps)" defaultValue="genapps" />
           </div>
         </div>
-        
-        <button
-          onClick={() => testCredentials()}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-        >
-          Test Credentials
-        </button>
       </div>
-      
+
+      {/* --- Netlify Credentials Section --- */}
       <div className="mb-8 p-4 border rounded">
-        <h2 className="text-xl font-semibold mb-4">Test Deployment</h2>
-        <div className="mb-4">
-          <p>Deploy a test project using the credentials above:</p>
+        <h2 className="text-xl font-semibold mb-4">Netlify Credentials</h2>
+        <div className="grid gap-4 mb-4">
+          <div>
+            <label className="block mb-1">API Token (PAT):</label>
+            <input type="password" id="netlifyToken" className="w-full p-2 border rounded" placeholder="Enter Netlify Personal Access Token" />
+          </div>
         </div>
-        
-        <button
-          onClick={() => testDeployment()}
-          className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 mr-4"
-        >
-          Test Deployment
-        </button>
-        
-        <button
-          onClick={() => checkTargets()}
-          className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600"
-        >
-          Check Available Targets
-        </button>
+      </div>
+
+      {/* --- Testing Section --- */}
+      <div className="mb-8 p-4 border rounded">
+        <h2 className="text-xl font-semibold mb-4">Test Actions</h2>
+        <div className="flex flex-wrap gap-4">
+          <button onClick={testCredentials} className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Test Target Creation</button>
+          <button onClick={testNetlifyDeployment} className="px-4 py-2 bg-teal-500 text-white rounded hover:bg-teal-600">Test Netlify Deploy</button>
+          <button onClick={testCloudflareDeployment} className="px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600">Test Cloudflare Deploy</button>
+          <button onClick={checkTargets} className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600">Check Available Targets</button>
+        </div>
       </div>
       
+      {/* --- Results Section --- */}
       <div className="p-4 border rounded">
         <h2 className="text-xl font-semibold mb-4">Results</h2>
         <pre id="results" className="bg-gray-100 p-4 rounded overflow-auto max-h-96">Results will appear here...</pre>
@@ -102,9 +76,10 @@ export default function DebugPanel() {
           }
           
           window.testCredentials = async function() {
-            const accountId = document.getElementById('accountId').value;
-            const apiToken = document.getElementById('apiToken').value;
-            const projectName = document.getElementById('projectName').value || 'genapps';
+            const cfAccountId = document.getElementById('cfAccountId').value;
+            const cfApiToken = document.getElementById('cfApiToken').value;
+            const cfProjectName = document.getElementById('cfProjectName').value || 'genapps';
+            const netlifyToken = document.getElementById('netlifyToken').value;
             
             try {
               const response = await fetch('/api/debug-target-creation', {
@@ -112,9 +87,13 @@ export default function DebugPanel() {
                 headers: {
                   'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ accountId, apiToken, projectName })
+                body: JSON.stringify({ 
+                  accountId: cfAccountId, 
+                  apiToken: cfApiToken, 
+                  projectName: cfProjectName,
+                  netlifyToken: netlifyToken
+                })
               });
-              
               const data = await response.json();
               window.showResults(data);
             } catch (error) {
@@ -122,10 +101,8 @@ export default function DebugPanel() {
             }
           }
           
-          window.testDeployment = async function() {
-            const accountId = document.getElementById('accountId').value;
-            const apiToken = document.getElementById('apiToken').value;
-            const projectName = document.getElementById('projectName').value || 'genapps';
+          window.testNetlifyDeployment = async function() {
+            const netlifyToken = document.getElementById('netlifyToken').value;
             
             try {
               const response = await fetch('/api/deploy', {
@@ -134,18 +111,47 @@ export default function DebugPanel() {
                   'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                  name: "test-project",
-                  target: "cloudflare-pages",
+                  name: "test-netlify-deploy",
+                  target: "netlify", // Explicitly target Netlify
                   files: {
-                    "index.html": "<html><body><h1>Test Project</h1><p>Created from Debug Panel</p></body></html>"
+                    "index.html": "<html><body><h1>Test Netlify Project</h1><p>Created from Debug Panel</p></body></html>"
                   },
-                  cfCredentials: {
-                    accountId,
-                    apiToken
+                  netlifyCredentials: {
+                    apiToken: netlifyToken
                   }
                 })
               });
-              
+              const data = await response.json();
+              window.showResults(data);
+            } catch (error) {
+              window.showResults({ error: error.message });
+            }
+          }
+
+          window.testCloudflareDeployment = async function() {
+            const cfAccountId = document.getElementById('cfAccountId').value;
+            const cfApiToken = document.getElementById('cfApiToken').value;
+            const cfProjectName = document.getElementById('cfProjectName').value || 'genapps';
+            
+            try {
+              const response = await fetch('/api/deploy', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  name: "test-cf-deploy",
+                  target: "cloudflare-pages", // Explicitly target Cloudflare
+                  files: {
+                    "index.html": "<html><body><h1>Test Cloudflare Project</h1><p>Created from Debug Panel</p></body></html>"
+                  },
+                  cfCredentials: {
+                    accountId: cfAccountId,
+                    apiToken: cfApiToken,
+                    projectName: cfProjectName
+                  }
+                })
+              });
               const data = await response.json();
               window.showResults(data);
             } catch (error) {
@@ -154,11 +160,11 @@ export default function DebugPanel() {
           }
           
           window.checkTargets = async function() {
+            // This function remains the same, it checks targets based on env/context
             try {
               const response = await fetch('/api/debug-targets', {
                 method: 'POST'
               });
-              
               const data = await response.json();
               window.showResults(data);
             } catch (error) {

@@ -1,11 +1,11 @@
 import { json } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
-import { getDeploymentManager } from '~/lib/deployment';
+import { getDeploymentManager } from '~/lib/deployment/deployment-manager';
 import { getProjectStateManager } from '~/lib/projects';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
 import type { DeploymentTarget } from '~/lib/deployment/targets/base';
 import type { CloudflareConfig, DeploymentStatus } from '~/lib/deployment/types';
-import { getCloudflareCredentials } from '~/lib/deployment/credentials';
+import { getCloudflareCredentials, getNetlifyCredentials } from '~/lib/deployment/credentials';
 
 // Define the environment variables we expect from Cloudflare
 interface EnvWithCloudflare {
@@ -42,7 +42,8 @@ export async function action({ request, context }: ActionFunctionArgs) {
       files = {},
       targetName,
       metadata = {},
-      cfCredentials  // New: Allow directly passing Cloudflare credentials for testing
+      cfCredentials, // Existing override for Cloudflare
+      netlifyCredentials // New: Allow directly passing Netlify credentials
     } = body;
 
     if (!projectId && Object.keys(files).length === 0) {
@@ -51,10 +52,32 @@ export async function action({ request, context }: ActionFunctionArgs) {
     
     logger.info(`Handling deployment request for ${projectId ? `project ID ${projectId}` : `project ${projectName}`}`);
 
-    // Get cloudflare environment variables from multiple possible sources
+    // --- Credential Handling --- 
     let cfConfig = getCloudflareCredentials(context);
-    
-    // If credentials are provided in the request, use those instead
+    let netlifyToken = getNetlifyCredentials(context).apiToken;
+    let credSource = netlifyToken ? 'environment/context' : 'none';
+
+    // Log initial credential status before overrides
+    logger.debug('Initial credentials from environment:', {
+      hasCloudflareAccountId: !!cfConfig.accountId,
+      hasCloudflareApiToken: !!cfConfig.apiToken,
+      hasNetlifyToken: !!netlifyToken,
+      source: credSource
+    });
+
+    // Add detailed context logging for debugging
+    logger.debug('Context structure in api.deploy:', {
+      hasContext: !!context,
+      contextType: context ? typeof context : 'undefined',
+      hasEnv: !!context?.env,
+      envType: context?.env ? typeof context.env : 'undefined',
+      hasCloudflare: !!context?.cloudflare,
+      cloudflareEnvAvailable: !!context?.cloudflare?.env,
+      envKeys: context?.env ? Object.keys(context.env) : [],
+      cfEnvKeys: context?.cloudflare?.env ? Object.keys(context.cloudflare.env) : []
+    });
+
+    // Override Cloudflare credentials if provided in request
     if (cfCredentials && cfCredentials.accountId && cfCredentials.apiToken) {
       logger.debug('Using Cloudflare credentials provided in request body');
       cfConfig = {
@@ -63,23 +86,35 @@ export async function action({ request, context }: ActionFunctionArgs) {
         apiToken: cfCredentials.apiToken,
         projectName: cfCredentials.projectName || cfConfig.projectName || 'genapps'
       };
+      credSource = 'request (Cloudflare)';
     }
     
+    // Only override Netlify token from request if not already set from environment
+    if (!netlifyToken && netlifyCredentials && netlifyCredentials.apiToken) {
+      logger.debug('Using Netlify token from request body (no token found in environment)');
+      netlifyToken = netlifyCredentials.apiToken;
+      credSource = 'request (Netlify)';
+    } else if (netlifyCredentials && netlifyCredentials.apiToken) {
+      logger.debug('Ignoring Netlify token from request body (using token from environment)');
+    }
+    // --- End Credential Handling ---
+    
     // Log credentials status (redacted)
-    logger.debug('Cloudflare credentials status:', {
-      hasAccountId: !!cfConfig.accountId,
-      hasApiToken: !!cfConfig.apiToken,
-      hasProjectName: !!cfConfig.projectName,
-      complete: !!(cfConfig.accountId && cfConfig.apiToken),
-      source: cfCredentials ? 'request' : 'environment'
+    logger.debug('Credentials status:', {
+      cfHasAccountId: !!cfConfig.accountId,
+      cfHasApiToken: !!cfConfig.apiToken,
+      cfComplete: !!(cfConfig.accountId && cfConfig.apiToken),
+      netlifyHasToken: !!netlifyToken,
+      source: credSource
     });
 
-    // Get managers
+    // Get managers, initializing DeploymentManager with potentially overridden credentials
     const projectManager = getProjectStateManager();
-    const deploymentManager = getDeploymentManager({
+    const deploymentManager = await getDeploymentManager({
       cloudflareConfig: cfConfig.accountId && cfConfig.apiToken 
         ? cfConfig as CloudflareConfig 
-        : undefined
+        : undefined,
+      netlifyToken: netlifyToken || undefined // Pass the potentially overridden token
     });
 
     // If projectId is provided but files aren't, load files from storage
@@ -121,7 +156,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
       files: deployFiles,
       targetName,
       projectId,
-      metadata
+      metadata: { ...metadata, environment: context } // Pass context for targets like local-zip
     });
     
     // If projectId was provided, save the deployment to the project
@@ -176,7 +211,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       cfConfig.apiToken = env.CLOUDFLARE_API_TOKEN;
     }
 
-    const deploymentManager = getDeploymentManager({
+    const deploymentManager = await getDeploymentManager({
       cloudflareConfig: cfConfig.accountId && cfConfig.apiToken 
         ? cfConfig as CloudflareConfig 
         : undefined

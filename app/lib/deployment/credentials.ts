@@ -49,6 +49,92 @@ export function loadCloudflareCredentials(): Partial<CloudflareConfig> {
 }
 
 /**
+ * Get Netlify credentials
+ */
+export function getNetlifyCredentials(context?: any): { apiToken?: string } {
+  const credentials: { apiToken?: string } = {};
+
+  // Debug log the context structure to understand what's available
+  logger.debug('Context structure in getNetlifyCredentials:', {
+    hasContext: !!context,
+    hasEnv: !!context?.env,
+    hasCloudflareEnv: !!context?.cloudflare?.env,
+    hasCloudflareContext: !!context?.cloudflare?.context,
+    envKeys: context?.env ? Object.keys(context.env) : [],
+    cfEnvKeys: context?.cloudflare?.env ? Object.keys(context.cloudflare.env) : [],
+    contextType: context ? typeof context : 'undefined'
+  });
+
+  // Array of possible environment sources, in order of priority
+  const possibleEnvSources = [
+    typeof process !== 'undefined' ? process.env : null, // Highest priority
+    context?.env,  // Common Remix/Cloudflare structure (direct environment variables)
+    context?.cloudflare?.env, // Cloudflare Pages specific structure
+    context?.context?.env, // Some Remix/CF contexts nest the env in context.context
+    context?.netlify?.env, // Netlify-specific context structure
+    context?.cloudflare?.context?.env, // Another possible cloudflare nesting
+    context, // Direct context access (lowest priority)
+  ];
+
+  // Debug log all possible sources
+  if (context) {
+    logger.debug('Checking Netlify token in all possible sources:', {
+      processEnv: typeof process !== 'undefined' && process.env ? 'available' : 'unavailable',
+      contextEnv: context.env ? 'available' : 'unavailable',
+      cloudflareEnv: context.cloudflare?.env ? 'available' : 'unavailable',
+      nestedContextEnv: context.context?.env ? 'available' : 'unavailable',
+      netlifyEnv: context.netlify?.env ? 'available' : 'unavailable',
+      cfContextEnv: context.cloudflare?.context?.env ? 'available' : 'unavailable'
+    });
+  }
+
+  // Look through possible sources to find token
+  for (const source of possibleEnvSources) {
+    if (source && typeof source.NETLIFY_AUTH_TOKEN === 'string' && source.NETLIFY_AUTH_TOKEN.trim() !== '') {
+      credentials.apiToken = source.NETLIFY_AUTH_TOKEN;
+      logger.debug('Found NETLIFY_AUTH_TOKEN in environment source:', { 
+        sourceType: source === process?.env ? 'process.env' : 
+                    source === context?.env ? 'context.env' :
+                    source === context?.cloudflare?.env ? 'context.cloudflare.env' :
+                    source === context?.context?.env ? 'context.context.env' :
+                    source === context?.netlify?.env ? 'context.netlify.env' :
+                    source === context?.cloudflare?.context?.env ? 'context.cloudflare.context.env' :
+                    'direct context',
+        tokenLength: credentials.apiToken.length
+      });
+      break; // Stop checking once found
+    }
+  }
+
+  // Direct access to specific properties for extra debug logging
+  if (context?.cloudflare?.env?.NETLIFY_AUTH_TOKEN) {
+    logger.debug('Direct check: Found NETLIFY_AUTH_TOKEN in context.cloudflare.env');
+    if (!credentials.apiToken) {
+      credentials.apiToken = context.cloudflare.env.NETLIFY_AUTH_TOKEN;
+    }
+  }
+
+  if (context?.env?.NETLIFY_AUTH_TOKEN) {
+    logger.debug('Direct check: Found NETLIFY_AUTH_TOKEN in context.env');
+    if (!credentials.apiToken) {
+      credentials.apiToken = context.env.NETLIFY_AUTH_TOKEN;
+    }
+  }
+
+  if (!credentials.apiToken) {
+    // Check for any credential in the deploymentOptions
+    if (context?.deploymentOptions?.netlifyCredentials?.apiToken) {
+      credentials.apiToken = context.deploymentOptions.netlifyCredentials.apiToken;
+      logger.debug('Found Netlify credentials in deploymentOptions');
+    } else {
+      logger.debug('NETLIFY_AUTH_TOKEN not found in any environment or context');
+    }
+  }
+
+  return credentials;
+}
+
+/**
  * Get Cloudflare credentials - combining loaded credentials with any from the context
  */
 export function getCloudflareCredentials(context?: any): Partial<CloudflareConfig> {

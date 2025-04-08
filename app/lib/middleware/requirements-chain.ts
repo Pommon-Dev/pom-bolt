@@ -1,12 +1,14 @@
 import { createScopedLogger } from '~/utils/logger';
 import { handleProjectContext } from './project-context';
 import type { ProjectRequestContext } from './project-context';
-import { getDeploymentManager } from '~/lib/deployment';
+import { getDeploymentManager } from '~/lib/deployment/deployment-manager';
 import { getProjectStateManager } from '~/lib/projects';
 import { CodegenService } from '~/lib/codegen/service';
 import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
 import { ZipPackager } from '~/lib/deployment/packagers/zip';
 import { kvPut } from '~/lib/kv/binding';
+import { NetlifyTarget } from '~/lib/deployment/targets/netlify';
+import { DeploymentManager } from '~/lib/deployment/deployment-manager';
 
 const logger = createScopedLogger('requirements-middleware');
 
@@ -28,6 +30,7 @@ export interface RequirementsContext extends ProjectRequestContext {
   archiveKey?: string; // Key for the stored ZIP archive
   error?: Error;
   env?: Record<string, any>; // Cloudflare environment
+  additionalRequirement?: boolean; // Flag to indicate this is a feature request for existing project
 }
 
 /**
@@ -153,12 +156,16 @@ export async function parseRequest(
       typeof body.deploymentOptions === 'object' ? body.deploymentOptions :
       typeof body.deployment?.settings === 'object' ? body.deployment.settings :
       {};
+
+    // Extract additionalRequirement flag
+    const additionalRequirement = Boolean(body.additionalRequirement);
     
     logger.debug('Parsed requirements request', { 
       contentLength: content.length,
       shouldDeploy,
       deploymentTarget,
-      hasOptions: Object.keys(deploymentOptions).length > 0
+      hasOptions: Object.keys(deploymentOptions).length > 0,
+      additionalRequirement
     });
     
     return {
@@ -168,7 +175,8 @@ export async function parseRequest(
       isNewProject: body.projectId ? false : true, // Default assumption based on projectId presence
       shouldDeploy,
       deploymentTarget,
-      deploymentOptions
+      deploymentOptions,
+      additionalRequirement
     };
   } catch (error) {
     logger.error('Failed to parse requirements request:', error);
@@ -187,14 +195,39 @@ export async function loadProjectContext(
   if (context.project) return context;
   
   try {
+    logger.debug('Loading project context', {
+      projectId: context.projectId,
+      isNewProject: context.isNewProject,
+      additionalRequirement: context.additionalRequirement
+    });
+
+    // If this is an additionalRequirement and we have a projectId, ensure isNewProject is false
+    if (context.additionalRequirement && context.projectId) {
+      context.isNewProject = false;
+      logger.info(`Processing additional requirement for existing project: ${context.projectId}`);
+    }
+    
     // Use the project context middleware to handle the request
     // This will set isNewProject, projectId, and project on the context
     const projectContext = await handleProjectContext(request);
     
     // Add the project context to the requirements context
-    context.isNewProject = projectContext.isNewProject;
+    context.isNewProject = context.additionalRequirement ? false : projectContext.isNewProject;
     context.projectId = projectContext.projectId;
     context.project = projectContext.project;
+    
+    // Double check project existence when additionalRequirement is true
+    if (context.additionalRequirement && context.projectId) {
+      const projectManager = getProjectStateManager();
+      const exists = await projectManager.projectExists(context.projectId);
+      
+      if (!exists) {
+        logger.warn(`Project ${context.projectId} not found despite additionalRequirement flag being set`);
+        throw new Error(`Project ${context.projectId} not found. Cannot add features to non-existent project.`);
+      }
+      
+      logger.info(`Confirmed project ${context.projectId} exists for feature request`);
+    }
     
     // Extract Cloudflare environment if available
     if (request.cf && typeof request.cf === 'object') {
@@ -366,6 +399,77 @@ export async function storeProjectZipArchive(
 }
 
 /**
+ * Configure the deployment manager with credentials from environment and request
+ */
+async function configureDeploymentManager(context: RequirementsContext): Promise<{
+  deploymentManager: DeploymentManager;
+  availableTargets: string[];
+}> {
+  // Get Cloudflare credentials if available
+  const cloudflareConfig = context.env && 
+    typeof context.env.CLOUDFLARE_ACCOUNT_ID === 'string' && 
+    typeof context.env.CLOUDFLARE_API_TOKEN === 'string' 
+      ? {
+          accountId: context.env.CLOUDFLARE_ACCOUNT_ID,
+          apiToken: context.env.CLOUDFLARE_API_TOKEN
+        } 
+      : undefined;
+  
+  // Handle Netlify credentials from request body or environment
+  let netlifyToken: string | undefined = undefined;
+  
+  // First check environment variables (highest priority)
+  if (context.env && typeof context.env.NETLIFY_AUTH_TOKEN === 'string') {
+    netlifyToken = context.env.NETLIFY_AUTH_TOKEN;
+    logger.info('Found Netlify credentials in environment');
+  } 
+  // Then check request body (lower priority)
+  else if (context.deploymentOptions?.netlifyCredentials?.apiToken) {
+    netlifyToken = context.deploymentOptions.netlifyCredentials.apiToken;
+    logger.info('Found Netlify credentials in request body');
+  }
+  
+  // Log environment details for debugging
+  logger.debug('Environment variables for deployment:', {
+    hasEnv: Boolean(context.env),
+    hasAccountId: context.env ? typeof context.env.CLOUDFLARE_ACCOUNT_ID === 'string' : false,
+    hasApiToken: context.env ? typeof context.env.CLOUDFLARE_API_TOKEN === 'string' : false,
+    hasNetlifyToken: !!netlifyToken,
+    cloudflareConfigPresent: Boolean(cloudflareConfig)
+  });
+      
+  const deploymentManager = await getDeploymentManager({
+    cloudflareConfig,
+    netlifyToken
+  });
+  
+  // Ensure Netlify is registered as a target if we have credentials
+  if (netlifyToken) {
+    logger.info('Ensuring Netlify target is registered with valid credentials');
+    // Check if Netlify is available in registered targets
+    const registeredTargets = deploymentManager.getRegisteredTargets();
+    if (!registeredTargets.includes('netlify')) {
+      logger.debug('Netlify target not found in registered targets, attempting to register');
+      try {
+        const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken });
+        if (await netlifyTarget.isAvailable()) {
+          deploymentManager.registerTarget('netlify', netlifyTarget);
+          logger.info('Successfully registered Netlify deployment target');
+        }
+      } catch (error) {
+        logger.warn('Failed to register Netlify target:', error);
+      }
+    }
+  }
+  
+  // Log available targets
+  const availableTargets = await deploymentManager.getAvailableTargets();
+  logger.debug('Available deployment targets:', { targets: availableTargets });
+  
+  return { deploymentManager, availableTargets };
+}
+
+/**
  * Process requirements and generate code/project
  */
 export async function processRequirements(
@@ -394,6 +498,16 @@ export async function processRequirements(
         throw new Error(`Project ${context.projectId} not found`);
       }
       
+      // Add requirements to the project if this is an additional requirement
+      if (context.additionalRequirement) {
+        logger.info(`Adding new requirements entry to project ${context.projectId}`);
+        await projectManager.addRequirements(
+          context.projectId,
+          context.content,
+          context.userId
+        );
+      }
+      
       // Get existing files
       logger.debug('Loading existing project files');
       const existingFiles = await projectManager.getProject(context.projectId)
@@ -410,270 +524,176 @@ export async function processRequirements(
       // Generate code using the CodegenService
       logger.info('Generating code from requirements for existing project');
       
-      try {
-        const codegenResult = await CodegenService.generateCode({
-          requirements: context.content,
-          existingFiles,
-          projectId: context.projectId,
-          isNewProject: false,
-          userId: context.userId,
-          serverEnv: context.env,
-          apiKeys,
-          providerSettings
-        });
-        
-        // Add/update files in the project
-        logger.debug(`Adding/updating ${Object.keys(codegenResult.files).length} files to project`);
-        
-        // Create updatedFiles array for the updateProject method
-        const now = Date.now();
-        const updatedFiles = Object.entries(codegenResult.files).map(([path, content]) => ({
+      const codegenResult = await CodegenService.generateCode({
+        requirements: context.content,
+        existingFiles,
+        projectId: context.projectId,
+        isNewProject: false,
+        userId: context.userId,
+        serverEnv: context.env,
+        apiKeys,
+        providerSettings
+      });
+      
+      // Update files in project
+      await projectManager.updateProject(context.projectId, {
+        updatedFiles: Object.entries(codegenResult.files).map(([path, content]) => ({
           path,
           content,
-          createdAt: now,  // These will be overridden for existing files
-          updatedAt: now
-        }));
-        
-        // Update the project with new files
-        await projectManager.updateProject(context.projectId, {
-          updatedFiles
-        });
-        
-        context.files = codegenResult.files;
-        
-        // Store project archive if environment context is available
-        if (context.env) {
-          const archiveKey = await storeProjectArchive(context.projectId, codegenResult.files, context);
-          if (archiveKey) {
-            context.archiveKey = archiveKey;
-            logger.info(`Project archive stored with key: ${archiveKey}`);
-          }
-        }
-        
-        // Handle deployment if requested
-        if (context.shouldDeploy) {
-          logger.info('Deploying updated project');
-          
-          try {
-            const cloudflareConfig = context.env && 
-              typeof context.env.CLOUDFLARE_ACCOUNT_ID === 'string' && 
-              typeof context.env.CLOUDFLARE_API_TOKEN === 'string' 
-                ? {
-                    accountId: context.env.CLOUDFLARE_ACCOUNT_ID,
-                    apiToken: context.env.CLOUDFLARE_API_TOKEN
-                  } 
-                : undefined;
-            
-            // Log environment details for debugging
-            logger.debug('Environment variables for deployment:', {
-              hasEnv: Boolean(context.env),
-              hasAccountId: context.env ? typeof context.env.CLOUDFLARE_ACCOUNT_ID === 'string' : false,
-              hasApiToken: context.env ? typeof context.env.CLOUDFLARE_API_TOKEN === 'string' : false,
-              cloudflareConfigPresent: Boolean(cloudflareConfig)
-            });
-            
-            const deploymentManager = getDeploymentManager({
-              cloudflareConfig
-            });
-            
-            // Log available targets
-            const availableTargets = await deploymentManager.getAvailableTargets();
-            logger.debug('Available deployment targets:', { targets: availableTargets });
-            
-            const deployment = await deploymentManager.deployWithBestTarget({
-              projectName: context.project.name,
-              files: codegenResult.files,
-              projectId: context.projectId,
-              targetName: context.deploymentTarget,
-              metadata: context.deploymentOptions
-            });
-            
-            // Create a deployment entry
-            const deploymentEntry = {
-              id: deployment.id,
-              url: deployment.url,
-              provider: deployment.provider,
-              timestamp: Date.now(),
-              status: deployment.status
-            };
-            
-            // Save deployment information
-            await projectManager.updateProject(context.projectId, {
-              metadata: {
-                lastDeployment: deploymentEntry
-              }
-            });
-            
-            context.deploymentResult = {
-              url: deployment.url,
-              id: deployment.id,
-              status: deployment.status
-            };
-            
-            logger.info(`Project deployed to ${deployment.url}`);
-          } catch (deployError) {
-            logger.error('Deployment failed:', deployError);
-            context.error = deployError instanceof Error ? deployError : new Error(String(deployError));
-          }
-        }
-      } catch (codegenError) {
-        logger.error('Code generation failed for existing project:', codegenError);
-        context.error = codegenError instanceof Error ? codegenError : new Error(String(codegenError));
-      }
-    } else {
-      // Handle new project creation
-      const projectName = generateProjectName(context.content);
-      logger.info(`Creating new project: ${projectName}`);
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }))
+      });
       
-      try {
-        // Create a new project
-        const newProject = await projectManager.createProject({
-          name: projectName,
-          initialRequirements: context.content.substring(0, 1000),
-          userId: context.userId,
-          metadata: {
-            createdFrom: 'requirements'
-          }
-        });
-        
-        context.project = newProject;
-        context.projectId = newProject.id;
-        
-        // Generate code using the CodegenService
-        logger.info('Generating code from requirements for new project');
+      // Add requirements to project history
+      if (!context.additionalRequirement) {
+        // Only add to history if not already added as additionalRequirement
+        await projectManager.addRequirements(
+          context.projectId,
+          context.content,
+          context.userId
+        );
+      }
+      
+      // Set generated files in context
+      context.files = codegenResult.files;
+      
+      // Store project archive if environment context is available
+      if (context.env) {
+        const archiveKey = await storeProjectArchive(context.projectId, codegenResult.files, context);
+        if (archiveKey) {
+          context.archiveKey = archiveKey;
+          logger.info(`Project archive stored with key: ${archiveKey}`);
+        }
+      }
+      
+      // Handle deployment if requested
+      if (context.shouldDeploy) {
+        logger.info('Deploying updated project');
         
         try {
-          const codegenResult = await CodegenService.generateCode({
-            requirements: context.content,
-            projectId: newProject.id,
-            isNewProject: true,
-            userId: context.userId,
-            serverEnv: context.env,
-            apiKeys,
-            providerSettings
+          const { deploymentManager, availableTargets } = await configureDeploymentManager(context);
+          
+          const deployment = await deploymentManager.deployWithBestTarget({
+            projectName: context.project.name,
+            files: codegenResult.files,
+            projectId: context.projectId,
+            targetName: context.deploymentTarget,
+            metadata: context.deploymentOptions
           });
           
-          // Add files to the project
-          logger.debug(`Adding ${Object.keys(codegenResult.files).length} files to new project`);
+          // Create a deployment entry
+          const deploymentEntry = {
+            id: deployment.id,
+            url: deployment.url,
+            provider: deployment.provider,
+            timestamp: Date.now(),
+            status: deployment.status
+          };
           
-          // Create updatedFiles array for the updateProject method
-          const now = Date.now();
-          const updatedFiles = Object.entries(codegenResult.files).map(([path, content]) => ({
-            path,
-            content,
-            createdAt: now,
-            updatedAt: now
-          }));
+          // Save the deployment to the project
+          await projectManager.addDeployment(context.projectId, deploymentEntry);
           
-          // Update the project with new files
-          await projectManager.updateProject(newProject.id, {
-            updatedFiles
-          });
+          // Set deployment result in context
+          context.deploymentResult = {
+            id: deployment.id,
+            url: deployment.url,
+            status: deployment.status
+          };
           
-          context.files = codegenResult.files;
-          
-          // Store project archive if environment context is available
-          if (context.env) {
-            const archiveKey = await storeProjectArchive(newProject.id, codegenResult.files, context);
-            if (archiveKey) {
-              context.archiveKey = archiveKey;
-              logger.info(`Project archive stored with key: ${archiveKey}`);
-            }
-          }
-          
-          // Handle deployment if requested
-          if (context.shouldDeploy) {
-            logger.info('Deploying new project');
-            
-            try {
-              const cloudflareConfig = context.env && 
-                typeof context.env.CLOUDFLARE_ACCOUNT_ID === 'string' && 
-                typeof context.env.CLOUDFLARE_API_TOKEN === 'string' 
-                  ? {
-                      accountId: context.env.CLOUDFLARE_ACCOUNT_ID,
-                      apiToken: context.env.CLOUDFLARE_API_TOKEN
-                    } 
-                  : undefined;
-              
-              // Log environment details for debugging
-              logger.debug('Environment variables for new project deployment:', {
-                hasEnv: Boolean(context.env),
-                hasAccountId: context.env ? typeof context.env.CLOUDFLARE_ACCOUNT_ID === 'string' : false,
-                hasApiToken: context.env ? typeof context.env.CLOUDFLARE_API_TOKEN === 'string' : false,
-                cloudflareConfigPresent: Boolean(cloudflareConfig)
-              });
-              
-              const deploymentManager = getDeploymentManager({
-                cloudflareConfig
-              });
-              
-              // Log available targets
-              const availableTargets = await deploymentManager.getAvailableTargets();
-              logger.debug('Available deployment targets for new project:', { targets: availableTargets });
-              
-              const deployment = await deploymentManager.deployWithBestTarget({
-                projectName: newProject.name,
-                files: codegenResult.files,
-                projectId: newProject.id,
-                targetName: context.deploymentTarget,
-                metadata: context.deploymentOptions
-              });
-              
-              // Create a deployment entry
-              const deploymentEntry = {
-                id: deployment.id,
-                url: deployment.url,
-                provider: deployment.provider,
-                timestamp: Date.now(),
-                status: deployment.status
-              };
-              
-              // Save deployment information
-              await projectManager.updateProject(newProject.id, {
-                metadata: {
-                  lastDeployment: deploymentEntry
-                }
-              });
-              
-              context.deploymentResult = {
-                url: deployment.url,
-                id: deployment.id,
-                status: deployment.status
-              };
-              
-              logger.info(`Project deployed to ${deployment.url}`);
-            } catch (deployError) {
-              logger.error('Deployment failed:', deployError);
-              context.error = deployError instanceof Error ? deployError : new Error(String(deployError));
-            }
-          }
-        } catch (codegenError) {
-          logger.error('Code generation failed for new project:', codegenError);
-          
-          // Fall back to sample project if code generation fails
-          logger.info('Falling back to sample project');
-          context.error = codegenError instanceof Error ? codegenError : new Error(String(codegenError));
-          
-          // Add a sample file with error information
-          const now = Date.now();
-          await projectManager.updateProject(newProject.id, {
-            updatedFiles: [{
-              path: 'README.md',
-              content: `# ${projectName}\n\nThis project was created from the following requirements:\n\n${context.content}\n\nCode generation failed with error: ${context.error.message}`,
-              createdAt: now,
-              updatedAt: now
-            }]
-          });
+          logger.info(`Deployment successful: ${deployment.provider} - ${deployment.url}`);
+        } catch (deployError) {
+          logger.error('Deployment failed:', deployError);
+          throw deployError;
         }
-      } catch (projectError) {
-        logger.error('Project creation failed:', projectError);
-        context.error = projectError instanceof Error ? projectError : new Error(String(projectError));
       }
+      
+      return context;
+    } else {
+      // Create a new project
+      logger.info('Creating new project from requirements');
+      
+      // Generate code for a new project
+      const codegenResult = await CodegenService.generateCode({
+        requirements: context.content,
+        projectId: 'new-project-' + Date.now(),
+        isNewProject: true,
+        userId: context.userId,
+        serverEnv: context.env,
+        apiKeys,
+        providerSettings
+      });
+      
+      // Create a new project
+      const projectName = codegenResult.metadata?.name || 'Untitled Project';
+      const newProject = await projectManager.createProject({
+        name: projectName,
+        initialRequirements: context.content,
+        userId: context.userId
+      });
+      
+      // Add files to the project
+      await projectManager.addFiles(newProject.id, codegenResult.files);
+      
+      // Update context with new project
+      context.projectId = newProject.id;
+      context.project = newProject;
+      context.files = codegenResult.files;
+      
+      // Store project archive if environment context is available
+      if (context.env) {
+        const archiveKey = await storeProjectArchive(newProject.id, codegenResult.files, context);
+        if (archiveKey) {
+          context.archiveKey = archiveKey;
+          logger.info(`Project archive stored with key: ${archiveKey}`);
+        }
+      }
+      
+      // Handle deployment if requested
+      if (context.shouldDeploy) {
+        logger.info('Deploying new project');
+        
+        try {
+          const { deploymentManager, availableTargets } = await configureDeploymentManager(context);
+          
+          const deployment = await deploymentManager.deployWithBestTarget({
+            projectName: newProject.name,
+            files: codegenResult.files,
+            projectId: newProject.id,
+            targetName: context.deploymentTarget,
+            metadata: context.deploymentOptions
+          });
+          
+          // Create a deployment entry
+          const deploymentEntry = {
+            id: deployment.id,
+            url: deployment.url,
+            provider: deployment.provider,
+            timestamp: Date.now(),
+            status: deployment.status
+          };
+          
+          // Save the deployment to the project
+          await projectManager.addDeployment(newProject.id, deploymentEntry);
+          
+          // Set deployment result in context
+          context.deploymentResult = {
+            id: deployment.id,
+            url: deployment.url,
+            status: deployment.status
+          };
+          
+          logger.info(`Deployment successful: ${deployment.provider} - ${deployment.url}`);
+        } catch (deployError) {
+          logger.error('Deployment failed:', deployError);
+          throw deployError;
+        }
+      }
+      
+      return context;
     }
-    
-    return context;
   } catch (error) {
-    logger.error('Error processing requirements:', error);
+    logger.error('Failed to process requirements:', error);
     throw error;
   }
 }

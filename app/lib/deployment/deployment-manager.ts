@@ -2,6 +2,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { getEnvironment, EnvironmentType } from '~/lib/environments';
 import type { DeploymentTarget } from './targets/base';
 import { CloudflarePagesTarget } from './targets/cloudflare-pages';
+import { NetlifyTarget } from './targets/netlify';
 import type { 
   DeploymentResult, 
   DeployOptions,
@@ -11,8 +12,12 @@ import type {
 } from './types';
 import { DeploymentErrorType } from './types';
 import { LocalZipTarget } from './targets/local-zip';
+import { getCloudflareCredentials, getNetlifyCredentials } from './credentials';
 
 const logger = createScopedLogger('deployment-manager');
+
+// Keep track of the initialization promise for the singleton
+let managerInitializationPromise: Promise<DeploymentManager> | null = null;
 
 /**
  * Options for deployment manager
@@ -20,6 +25,7 @@ const logger = createScopedLogger('deployment-manager');
 export interface DeploymentManagerOptions {
   preferredTargets?: string[];
   cloudflareConfig?: CloudflareConfig;
+  netlifyToken?: string;
 }
 
 /**
@@ -30,28 +36,38 @@ export class DeploymentManager {
   private targets: Map<string, DeploymentTarget> = new Map();
   private preferredTargets: string[] = [];
   
-  constructor(options?: DeploymentManagerOptions) {
+  // Make constructor private to force initialization via static create method
+  private constructor(options?: DeploymentManagerOptions) {
     this.preferredTargets = options?.preferredTargets || [
+      'netlify', // Ensure netlify is first by default
       'cloudflare-pages',
       'vercel',
-      'netlify',
       'github-pages',
-      'local-tunnel'
+      'local-tunnel',
+      'local-zip' // Ensure local-zip is always considered, but last
     ];
     
-    // Initialize with basic targets synchronously
-    this.initializeBasicTargets(options);
-    
-    // Then attempt to register and validate cloud targets asynchronously
-    this.registerAvailableTargets(options).catch(error => {
-      logger.error('Error registering deployment targets:', error);
-    });
+    // Basic sync initialization can remain here if needed, like setting preferredTargets
+    this.initializeBasicTargets(); // Initialize fallback target synchronously
+  }
+
+  // Private initialization method that handles async parts
+  private async initializeAsync(options?: DeploymentManagerOptions): Promise<void> {
+    // Attempt to register and validate cloud targets asynchronously
+    await this.registerAvailableTargets(options); // Await the async registration
+  }
+
+  // Public static async factory method
+  public static async create(options?: DeploymentManagerOptions): Promise<DeploymentManager> {
+    const instance = new DeploymentManager(options);
+    await instance.initializeAsync(options); // Wait for async initialization
+    return instance;
   }
   
   /**
    * Initialize basic targets synchronously
    */
-  private initializeBasicTargets(options?: DeploymentManagerOptions): void {
+  private initializeBasicTargets(): void {
     // Always register the local-zip target as a fallback
     try {
       const localZipTarget = new LocalZipTarget();
@@ -67,8 +83,41 @@ export class DeploymentManager {
    */
   private async registerAvailableTargets(options?: DeploymentManagerOptions): Promise<void> {
     const environment = getEnvironment();
+    logger.debug('Starting async target registration...'); // Add log
     
-    // Get Cloudflare credentials
+    // --- Netlify Target Registration ---
+    try {
+      let netlifyToken = options?.netlifyToken;
+      const credsSource = options?.netlifyToken ? 'options' : 'environment/context';
+      if (!netlifyToken) {
+        const netlifyCreds = getNetlifyCredentials();
+        netlifyToken = netlifyCreds.apiToken;
+        logger.debug('Attempting to retrieve Netlify credentials from environment/context');
+      }
+
+      logger.debug(`Netlify token check: Present=${!!netlifyToken}, Source=${credsSource}`);
+
+      if (netlifyToken) {
+        logger.info('Attempting to register Netlify deployment target (Token found)');
+        const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken });
+        logger.debug('NetlifyTarget instantiated. Calling isAvailable()...');
+        const isAvailable = await netlifyTarget.isAvailable();
+        logger.debug(`NetlifyTarget.isAvailable() returned: ${isAvailable}`);
+        if (isAvailable) {
+          this.registerTarget('netlify', netlifyTarget);
+          logger.info('Successfully registered Netlify deployment target');
+        } else {
+          logger.warn('Netlify deployment target token found but API validation (isAvailable) failed');
+        }
+      } else {
+        logger.warn('Netlify deployment target not registered - missing API token');
+      }
+    } catch (error) {
+      logger.error('Failed to register Netlify deployment target (error during registration):', error);
+    }
+    // --- End Netlify Target Registration ---
+
+    // --- Cloudflare Pages Target Registration ---
     try {
       // Check if credentials are provided in options first
       let accountId = options?.cloudflareConfig?.accountId;
@@ -77,10 +126,11 @@ export class DeploymentManager {
       
       // If not provided in options, get from environment
       if (!accountId || !apiToken) {
-        accountId = environment.getEnvVariable('CLOUDFLARE_ACCOUNT_ID');
-        apiToken = environment.getEnvVariable('CLOUDFLARE_API_TOKEN');
-        
-        logger.debug('Attempting to retrieve Cloudflare credentials from environment');
+        const cfCreds = getCloudflareCredentials();
+        accountId = cfCreds.accountId;
+        apiToken = cfCreds.apiToken;
+        projectName = cfCreds.projectName || 'genapps';
+        logger.debug('Attempting to retrieve Cloudflare credentials from environment/context');
       }
       
       if (accountId && apiToken) {
@@ -109,9 +159,11 @@ export class DeploymentManager {
     } catch (error) {
       logger.error('Failed to register Cloudflare Pages deployment target:', error);
     }
+    // --- End Cloudflare Pages Target Registration ---
     
     // Log which targets were registered
     logger.info(`Registered deployment targets: ${this.getRegisteredTargets().join(', ')}`);
+    logger.debug('Finished async target registration.'); // Add log
   }
   
   /**
@@ -297,24 +349,36 @@ export class DeploymentManager {
   }
 }
 
-// Singleton instance
-let deploymentManagerInstance: DeploymentManager | null = null;
-
 /**
- * Get the deployment manager instance
+ * Get the deployment manager instance (now returns a Promise)
+ * Handles singleton pattern for the async initialization.
  */
-export function getDeploymentManager(options?: DeploymentManagerOptions): DeploymentManager {
-  if (!deploymentManagerInstance) {
-    deploymentManagerInstance = new DeploymentManager(options);
+export function getDeploymentManager(options?: DeploymentManagerOptions): Promise<DeploymentManager> {
+  // If options are provided, force re-initialization by creating a new promise
+  // Otherwise, reuse the existing promise if available
+  if (options || !managerInitializationPromise) {
+      logger.debug(
+          `${managerInitializationPromise ? 'Re-initializing' : 'Initializing'} DeploymentManager asynchronously with options:`,
+          {
+              hasPreferredTargets: !!options?.preferredTargets,
+              hasCloudflareConfig: !!options?.cloudflareConfig,
+              hasNetlifyToken: !!options?.netlifyToken
+          }
+      );
+      // Store the promise of the new instance creation
+      managerInitializationPromise = DeploymentManager.create(options);
+  } else {
+      logger.debug('Reusing existing DeploymentManager initialization promise');
   }
-  
-  return deploymentManagerInstance;
+
+  return managerInitializationPromise;
 }
 
 /**
- * Reset the deployment manager instance
+ * Reset the deployment manager instance promise
  * Useful for testing or when the environment changes
  */
 export function resetDeploymentManager(): void {
-  deploymentManagerInstance = null;
+  managerInitializationPromise = null;
+  logger.debug('DeploymentManager instance promise reset.');
 } 

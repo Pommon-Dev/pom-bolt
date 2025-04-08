@@ -18,7 +18,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       content: 'string (required) - Project requirements text',
       deploy: 'boolean (optional) - Whether to deploy the generated code',
       deploymentTarget: 'string (optional) - Deployment target platform',
-      projectId: 'string (optional) - Existing project ID to update'
+      projectId: 'string (optional) - Existing project ID to update',
+      additionalRequirement: 'boolean (optional) - Set to true to add features to existing project'
     }
   });
 }
@@ -64,7 +65,8 @@ export async function action({ request, context }: ActionFunctionArgs) {
           logger.debug('Parsed JSON body directly:', {
             hasContent: Boolean(reqBody.content || reqBody.requirements),
             contentType: reqBody.content ? 'content' : reqBody.requirements ? 'requirements' : 'none',
-            keys: Object.keys(reqBody)
+            keys: Object.keys(reqBody),
+            additionalRequirement: Boolean(reqBody.additionalRequirement)
           });
         } catch (jsonError) {
           logger.error('Failed to parse JSON directly:', jsonError);
@@ -88,12 +90,26 @@ export async function action({ request, context }: ActionFunctionArgs) {
       content: reqBody.content || reqBody.requirements || '',
       projectId: reqBody.projectId || reqBody.id || '',
       isNewProject: !reqBody.projectId && !reqBody.id,
+      additionalRequirement: Boolean(reqBody.additionalRequirement),
       userId: reqBody.userId,
       shouldDeploy: Boolean(reqBody.deploy || reqBody.deployment || reqBody.deployTarget),
       deploymentTarget: reqBody.deployTarget || reqBody.deploymentTarget,
+      deploymentOptions: reqBody.deploymentOptions || {}, // Include deploymentOptions from the request
       files: {},
       env: (context as any) || {} // Pass the entire context to ensure KV bindings work
     };
+    
+    // If netlifyCredentials was provided at the top level, move it to deploymentOptions
+    if (reqBody.netlifyCredentials) {
+      reqContext.deploymentOptions = reqContext.deploymentOptions || {};
+      reqContext.deploymentOptions.netlifyCredentials = reqBody.netlifyCredentials;
+    }
+    
+    // If cfCredentials was provided at the top level, move it to deploymentOptions
+    if (reqBody.cfCredentials) {
+      reqContext.deploymentOptions = reqContext.deploymentOptions || {};
+      reqContext.deploymentOptions.cfCredentials = reqBody.cfCredentials;
+    }
     
     // If Cloudflare context has env, add it to the requirements context
     if ((context as any)?.env) {
@@ -105,6 +121,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
       contentLength: reqContext.content ? reqContext.content.length : 0,
       projectId: reqContext.projectId || '(none)',
       isNewProject: reqContext.isNewProject,
+      additionalRequirement: reqContext.additionalRequirement,
       hasEnv: !!reqContext.env,
       shouldDeploy: reqContext.shouldDeploy,
       deploymentTarget: reqContext.deploymentTarget

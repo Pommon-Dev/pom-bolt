@@ -1,6 +1,6 @@
 import { getEnvironment } from '~/lib/environments';
-import { getProjectStateManager } from '~/lib/projects';
-import { getDeploymentManager } from '~/lib/deployment';
+import { getProjectStateManager } from '../app/lib/projects';
+import { getDeploymentManager } from '../app/lib/deployment/deployment-manager';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('architecture-test');
@@ -83,7 +83,7 @@ document.getElementById('alert-button').addEventListener('click', function() {
   
   // Test deployment system if available
   logger.info('Testing deployment system...');
-  const deploymentManager = getDeploymentManager();
+  const deploymentManager = await getDeploymentManager();
   const availableTargets = await deploymentManager.getAvailableTargets();
   
   logger.info(`Available deployment targets: ${availableTargets.length > 0 ? availableTargets.join(', ') : 'None'}`);
