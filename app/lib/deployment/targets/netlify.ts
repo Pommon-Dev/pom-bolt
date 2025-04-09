@@ -171,6 +171,35 @@ export class NetlifyTarget extends BaseDeploymentTarget {
     return !!site;
   }
 
+  /**
+   * Sanitize project name for Netlify site name
+   * Netlify has specific requirements for site names:
+   * - Lowercase letters, numbers, and hyphens only
+   * - No spaces or special characters
+   * - Must start and end with alphanumeric characters
+   */
+  protected sanitizeProjectName(name: string): string {
+    // Replace spaces and special characters with hyphens
+    let sanitized = name
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')    // Replace any non-alphanumeric characters with hyphens
+      .replace(/--+/g, '-')           // Replace multiple consecutive hyphens with a single one
+      .replace(/^-+|-+$/g, '');       // Remove leading and trailing hyphens
+      
+    // Ensure we have a valid string
+    if (!sanitized) {
+      sanitized = `site-${Date.now()}`;
+    }
+    
+    // Truncate if too long (Netlify limits to 63 chars)
+    if (sanitized.length > 63) {
+      sanitized = sanitized.substring(0, 60) + '-' + Math.floor(Math.random() * 100);
+    }
+    
+    logger.debug(`Sanitized project name: ${name} -> ${sanitized}`);
+    return sanitized;
+  }
+
   async initializeProject(options: ProjectOptions): Promise<ProjectMetadata> {
     // Netlify site names must be unique globally. We use the sanitized pom-bolt project name.
     // If it's taken, we might need a strategy to append a unique identifier.
@@ -183,10 +212,13 @@ export class NetlifyTarget extends BaseDeploymentTarget {
       if (site) {
         logger.info(`Using existing Netlify site: ${site.name} (ID: ${site.id})`);
       } else {
-        logger.info(`Creating new Netlify site: ${sanitizedName}`);
+        // If we need to create a new site, try with timestamp suffix if the name might be taken
+        const timestampedName = `${sanitizedName}-${Date.now()}`;
+        logger.info(`Creating new Netlify site with timestamped name: ${timestampedName}`);
+        
         const createResponse = await this.fetchNetlifyApi('/sites', {
           method: 'POST',
-          body: JSON.stringify({ name: sanitizedName }), // Create site with just a name
+          body: JSON.stringify({ name: timestampedName }), // Use timestamped name
         });
 
         if (!createResponse.ok) {
@@ -195,17 +227,37 @@ export class NetlifyTarget extends BaseDeploymentTarget {
             // Use type assertion for error data
             const errorData = await createResponse.json() as NetlifyErrorResponse;
             errorMsg = errorData.message || errorMsg;
-             // Handle specific case where name is taken
-             if (createResponse.status === 422 && errorMsg.includes("name already exists")) {
-                 // TODO: Implement a retry strategy with a modified name (e.g., append random suffix)
-                 logger.error(`Netlify site name "${sanitizedName}" is already taken. Implement retry logic.`);
-                 throw new Error(`Netlify site name "${sanitizedName}" is already taken.`);
-             }
-          } catch (parseError) { /* Ignore if response body isn't JSON */ }
-          throw new Error(`Failed to create Netlify site: ${errorMsg}`);
+             
+            // Handle specific case where even timestamped name is taken
+            if (createResponse.status === 422 && errorMsg.includes("name already exists")) {
+                // Try one more time with a random suffix
+                const randomName = `${sanitizedName}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+                logger.warn(`Netlify site name "${timestampedName}" was already taken. Trying with random name: ${randomName}`);
+                
+                const retryResponse = await this.fetchNetlifyApi('/sites', {
+                  method: 'POST',
+                  body: JSON.stringify({ name: randomName }),
+                });
+                
+                if (!retryResponse.ok) {
+                  throw new Error(`Failed to create Netlify site: ${await retryResponse.text()}`);
+                }
+                
+                site = await retryResponse.json() as NetlifySite;
+                logger.info(`Successfully created Netlify site on retry: ${site.name} (ID: ${site.id})`);
+            } else {
+              throw new Error(`Failed to create Netlify site: ${errorMsg}`);
+            }
+          } catch (parseError) {
+            if (parseError instanceof Error && parseError.message.includes("Failed to create Netlify site")) {
+              throw parseError; // Re-throw our custom error
+            }
+            throw new Error(`Failed to create Netlify site: ${errorMsg}`);
+          }
+        } else {
+          site = await createResponse.json() as NetlifySite;
+          logger.info(`Successfully created Netlify site: ${site.name} (ID: ${site.id})`);
         }
-        site = await createResponse.json() as NetlifySite;
-        logger.info(`Successfully created Netlify site: ${site.name} (ID: ${site.id})`);
       }
 
       // Use ssl_url if available, otherwise fallback

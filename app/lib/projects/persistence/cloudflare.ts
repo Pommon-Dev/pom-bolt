@@ -11,12 +11,18 @@ const logger = createScopedLogger('cloudflare-project-storage');
 export class CloudflareProjectStorage implements ProjectStorageAdapter {
   private readonly storagePrefix = 'pom_bolt_project_';
   private readonly projectListKey = 'pom_bolt_project_list';
-  private readonly environment = getEnvironment();
+  private readonly environment;
   private readonly storageType: StorageType;
   
-  constructor() {
+  constructor(context?: any) {
+    // Pass context to environment if provided, to ensure proper detection
+    this.environment = getEnvironment(context);
     this.storageType = this.selectStorageType();
-    logger.info(`Using storage type: ${this.storageType}`);
+    logger.info(`Using storage type: ${this.storageType}`, { 
+      environmentType: this.environment.getInfo().type,
+      hasContext: !!context,
+      hasCfContext: !!context?.cloudflare
+    });
   }
   
   /**

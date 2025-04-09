@@ -29,41 +29,50 @@ export function detectEnvironment(context?: any): Environment {
  */
 function detectCloudflareEnvironment(context?: any): boolean {
   try {
-    // Access environment variables from context or process.env
-    const cloudflareEnv = context?.env || process.env;
+    // Check if we have context.cloudflare structure first (Remix/Pages specific)
+    const hasCloudflareContext = !!context?.cloudflare;
+    const hasCloudflarePagesEnv = !!context?.cloudflare?.env?.CF_PAGES;
+    
+    // Access environment variables from different possible locations
+    const directEnv = context?.env || {};
+    const cloudflareEnv = context?.cloudflare?.env || {};
+    const combinedEnv = { ...directEnv, ...cloudflareEnv, ...process.env };
     
     // Check for Cloudflare Pages environment variable
     const isPagesEnv = 
-      cloudflareEnv?.CF_PAGES === '1' || 
-      cloudflareEnv?.CF_PAGES === 'true' ||
-      !!cloudflareEnv?.CF_PAGES_URL;
+      combinedEnv?.CF_PAGES === '1' || 
+      combinedEnv?.CF_PAGES === 'true' ||
+      !!combinedEnv?.CF_PAGES_URL;
     
     // Check for Cloudflare Pages branch
     const hasPagesInfo = 
-      !!cloudflareEnv?.CF_PAGES_BRANCH ||
-      !!cloudflareEnv?.CF_PAGES_COMMIT_SHA;
+      !!combinedEnv?.CF_PAGES_BRANCH ||
+      !!combinedEnv?.CF_PAGES_COMMIT_SHA;
     
-    // Check for KV binding in context or global scope
+    // Check for KV binding in context, cloudflare.env, or global scope
     const hasKvBinding = 
+      !!directEnv?.POM_BOLT_PROJECTS ||
       !!cloudflareEnv?.POM_BOLT_PROJECTS ||
       (typeof globalThis !== 'undefined' && 'POM_BOLT_PROJECTS' in globalThis);
     
     // Check for Cloudflare request context
-    const hasCloudflareRequest = !!context?.request?.cf;
+    const hasCloudflareRequest = !!context?.request?.cf || !!context?.cloudflare?.request?.cf;
     
     // Log the detection factors
     logger.debug('Cloudflare environment detection:', {
+      hasCloudflareContext,
+      hasCloudflarePagesEnv,
       isPagesEnv,
       hasPagesInfo,
       hasKvBinding,
       hasCloudflareRequest,
-      cf_pages: cloudflareEnv?.CF_PAGES, 
-      cf_pages_url: cloudflareEnv?.CF_PAGES_URL,
-      cf_pages_branch: cloudflareEnv?.CF_PAGES_BRANCH,
-      node_env: cloudflareEnv?.NODE_ENV
+      cf_pages: combinedEnv?.CF_PAGES, 
+      cf_pages_url: combinedEnv?.CF_PAGES_URL,
+      cf_pages_branch: combinedEnv?.CF_PAGES_BRANCH,
+      node_env: combinedEnv?.NODE_ENV
     });
     
-    return isPagesEnv || hasKvBinding || hasPagesInfo || hasCloudflareRequest;
+    return hasCloudflareContext || isPagesEnv || hasKvBinding || hasPagesInfo || hasCloudflareRequest;
   } catch (error) {
     logger.warn('Error detecting Cloudflare environment:', error);
     return false;
@@ -75,10 +84,28 @@ function detectCloudflareEnvironment(context?: any): boolean {
  * Creates it if it doesn't exist yet, or if a new context is provided
  */
 export function getEnvironment(context?: any): Environment {
-  if (!environment || context) {
+  // Always recreate environment when context is provided
+  if (context) {
+    logger.debug('Creating environment with context', {
+      hasContext: !!context, 
+      hasCloudflare: !!context?.cloudflare,
+      hasEnv: !!context?.env,
+      hasCfEnv: !!context?.cloudflare?.env
+    });
+    
+    // Force recreation with the provided context
     environment = detectEnvironment(context);
+    return environment;
   }
   
+  // Reuse existing environment if available
+  if (environment) {
+    return environment;
+  }
+  
+  // Create a new environment if none exists
+  logger.debug('Creating new environment without context');
+  environment = detectEnvironment();
   return environment;
 }
 

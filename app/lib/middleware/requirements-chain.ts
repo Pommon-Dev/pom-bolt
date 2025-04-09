@@ -1,14 +1,24 @@
-import { createScopedLogger } from '~/utils/logger';
-import { handleProjectContext } from './project-context';
-import type { ProjectRequestContext } from './project-context';
-import { getDeploymentManager } from '~/lib/deployment/deployment-manager';
-import { getProjectStateManager } from '~/lib/projects';
+import { v4 as uuidv4 } from 'uuid';
 import { CodegenService } from '~/lib/codegen/service';
-import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
-import { ZipPackager } from '~/lib/deployment/packagers/zip';
-import { kvPut } from '~/lib/kv/binding';
+import { getDeploymentManager } from '~/lib/deployment';
+import { createScopedLogger } from '~/utils/logger';
 import { NetlifyTarget } from '~/lib/deployment/targets/netlify';
 import { DeploymentManager } from '~/lib/deployment/deployment-manager';
+import { ZipPackager } from '~/lib/deployment/packagers/zip';
+import { kvPut } from '~/lib/kv/binding';
+import { ProjectStateManager } from '~/lib/projects/state-manager';
+import { getProjectStateManager } from '~/lib/projects';
+import { handleProjectContext } from './project-context';
+import type { ProjectRequestContext } from './project-context';
+import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
+
+// Define ChatRequest type locally since we can't import it
+interface ChatRequest {
+  apiKeys?: Record<string, string>;
+  files?: Record<string, string>;
+  promptId?: string;
+  contextOptimization?: boolean;
+}
 
 const logger = createScopedLogger('requirements-middleware');
 
@@ -418,15 +428,20 @@ async function configureDeploymentManager(context: RequirementsContext): Promise
   // Handle Netlify credentials from request body or environment
   let netlifyToken: string | undefined = undefined;
   
-  // First check environment variables (highest priority)
-  if (context.env && typeof context.env.NETLIFY_AUTH_TOKEN === 'string') {
+  // First check if credentials are provided in the deployment options (highest priority)
+  if (context.deploymentOptions?.netlifyCredentials?.apiToken) {
+    netlifyToken = context.deploymentOptions.netlifyCredentials.apiToken;
+    logger.info('Found Netlify credentials in request body deploymentOptions.netlifyCredentials');
+  }
+  // Then check if direct netlifyToken is provided in deployment options
+  else if (context.deploymentOptions?.netlifyToken) {
+    netlifyToken = context.deploymentOptions.netlifyToken;
+    logger.info('Found Netlify credentials in request body deploymentOptions.netlifyToken');
+  } 
+  // Finally check environment variables
+  else if (context.env && typeof context.env.NETLIFY_AUTH_TOKEN === 'string') {
     netlifyToken = context.env.NETLIFY_AUTH_TOKEN;
     logger.info('Found Netlify credentials in environment');
-  } 
-  // Then check request body (lower priority)
-  else if (context.deploymentOptions?.netlifyCredentials?.apiToken) {
-    netlifyToken = context.deploymentOptions.netlifyCredentials.apiToken;
-    logger.info('Found Netlify credentials in request body');
   }
   
   // Log environment details for debugging
@@ -435,7 +450,11 @@ async function configureDeploymentManager(context: RequirementsContext): Promise
     hasAccountId: context.env ? typeof context.env.CLOUDFLARE_ACCOUNT_ID === 'string' : false,
     hasApiToken: context.env ? typeof context.env.CLOUDFLARE_API_TOKEN === 'string' : false,
     hasNetlifyToken: !!netlifyToken,
-    cloudflareConfigPresent: Boolean(cloudflareConfig)
+    cloudflareConfigPresent: Boolean(cloudflareConfig),
+    netlifyTokenSource: netlifyToken 
+      ? (context.deploymentOptions?.netlifyCredentials ? 'deploymentOptions.netlifyCredentials' : 
+         context.deploymentOptions?.netlifyToken ? 'deploymentOptions.netlifyToken' : 'environment') 
+      : 'none'
   });
       
   const deploymentManager = await getDeploymentManager({
@@ -452,9 +471,12 @@ async function configureDeploymentManager(context: RequirementsContext): Promise
       logger.debug('Netlify target not found in registered targets, attempting to register');
       try {
         const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken });
-        if (await netlifyTarget.isAvailable()) {
+        const isAvailable = await netlifyTarget.isAvailable();
+        if (isAvailable) {
           deploymentManager.registerTarget('netlify', netlifyTarget);
           logger.info('Successfully registered Netlify deployment target');
+        } else {
+          logger.warn('Netlify target API validation failed with provided token');
         }
       } catch (error) {
         logger.warn('Failed to register Netlify target:', error);

@@ -25,22 +25,28 @@ const logger = createScopedLogger('project-state-manager');
 export class ProjectStateManager {
   private storageAdapter: ProjectStorageAdapter;
   
-  constructor() {
-    this.storageAdapter = this.selectStorageAdapter();
+  constructor(context?: any) {
+    this.storageAdapter = this.selectStorageAdapter(context);
   }
   
   /**
    * Select the appropriate storage adapter based on the environment
    */
-  private selectStorageAdapter(): ProjectStorageAdapter {
-    const environment = getEnvironment();
+  private selectStorageAdapter(context?: any): ProjectStorageAdapter {
+    const environment = getEnvironment(context);
     const envInfo = environment.getInfo();
     
-    logger.info(`Selecting storage adapter for environment: ${envInfo.type}`);
+    logger.info(`Selecting storage adapter for environment: ${envInfo.type}`, {
+      envType: envInfo.type,
+      hasContext: !!context,
+      hasCloudflare: !!context?.cloudflare,
+      hasEnv: !!context?.env,
+      hasCfEnv: !!context?.cloudflare?.env
+    });
     
     switch(envInfo.type) {
       case EnvironmentType.CLOUDFLARE:
-        return new CloudflareProjectStorage();
+        return new CloudflareProjectStorage(context);
       case EnvironmentType.LOCAL:
       default:
         return new LocalProjectStorage();
@@ -108,7 +114,15 @@ export class ProjectStateManager {
    * Check if a project exists
    */
   async projectExists(id: string): Promise<boolean> {
-    return this.storageAdapter.projectExists(id);
+    try {
+      logger.debug(`Checking if project ${id} exists...`);
+      const exists = await this.storageAdapter.projectExists(id);
+      logger.debug(`Project ${id} exists: ${exists}`);
+      return exists;
+    } catch (error) {
+      logger.error(`Error checking if project ${id} exists:`, error);
+      return false;
+    }
   }
   
   /**
