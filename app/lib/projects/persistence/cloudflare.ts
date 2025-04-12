@@ -69,11 +69,12 @@ export class CloudflareProjectStorage implements ProjectStorageAdapter {
       
       // Then save the project data
       const key = this.getProjectKey(project.id);
+      logger.debug(`[saveProject] Attempting to save project with key: ${key}`, { projectId: project.id });
       await this.environment.storeValue(this.storageType, key, project);
       
-      logger.debug(`Saved project ${project.id} to Cloudflare storage`);
+      logger.info(`[saveProject] Saved project ${project.id} to Cloudflare storage with key: ${key}`);
     } catch (error) {
-      logger.error(`Failed to save project ${project.id}:`, error);
+      logger.error(`[saveProject] Failed to save project ${project.id}:`, error);
       throw new Error(`Failed to save project: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -84,16 +85,18 @@ export class CloudflareProjectStorage implements ProjectStorageAdapter {
   async getProject(id: string): Promise<ProjectState | null> {
     try {
       const key = this.getProjectKey(id);
+      logger.debug(`[getProject] Attempting to retrieve project with key: ${key}`, { projectId: id });
       const project = await this.environment.retrieveValue<ProjectState>(this.storageType, key);
       
       if (!project) {
-        logger.debug(`Project ${id} not found in Cloudflare storage`);
+        logger.warn(`[getProject] Project ${id} not found in Cloudflare storage using key: ${key}`);
         return null;
       }
       
+      logger.info(`[getProject] Successfully retrieved project ${id} using key: ${key}`);
       return project;
     } catch (error) {
-      logger.error(`Failed to get project ${id}:`, error);
+      logger.error(`[getProject] Failed to get project ${id}:`, error);
       return null;
     }
   }

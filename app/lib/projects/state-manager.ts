@@ -391,9 +391,13 @@ export class ProjectStateManager {
 // Export a singleton instance for convenience
 let stateManagerInstance: ProjectStateManager | null = null;
 
-export function getProjectStateManager(): ProjectStateManager {
+// Accept optional context
+export function getProjectStateManager(context?: any): ProjectStateManager {
+  // Pass context to the constructor
+  // Simple singleton: If we have an instance, assume it was created with the correct context needed.
+  // More robust solution might involve context-keyed singletons or removing singleton.
   if (!stateManagerInstance) {
-    stateManagerInstance = new ProjectStateManager();
+    stateManagerInstance = new ProjectStateManager(context);
   }
   
   return stateManagerInstance;

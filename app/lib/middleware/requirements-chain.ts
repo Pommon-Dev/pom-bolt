@@ -648,13 +648,20 @@ export async function processRequirements(
       
       // Create a new project
       const projectName = codegenResult.metadata?.name || 'Untitled Project';
+      logger.info('[processRequirements] Creating new project entry', { projectName });
       const newProject = await projectManager.createProject({
         name: projectName,
         initialRequirements: context.content,
-        userId: context.userId
+        userId: context.userId,
+        metadata: {
+          ...codegenResult.metadata,
+          requestId: uuidv4(),
+          isArchived: false,
+        }
       });
       
       // Add files to the project
+      logger.info('[processRequirements] Adding files to new project', { projectId: newProject.id });
       await projectManager.addFiles(newProject.id, codegenResult.files);
       
       // Update context with new project
@@ -662,56 +669,32 @@ export async function processRequirements(
       context.project = newProject;
       context.files = codegenResult.files;
       
+      // Add separate direct reference to ensure the basic project data is stored with just the ID
+      // This ensures deploy endpoints can find it later
+      try {
+        logger.info('[processRequirements] Storing direct project reference', { projectId: newProject.id });
+        // Force-save just the basic project data again to ensure it's stored with just the ID
+        await projectManager.updateProject(newProject.id, {
+          metadata: {
+            isDirectReference: true,
+            timestamp: Date.now()
+          }
+        });
+        logger.info(`[processRequirements] Successfully stored direct project reference for ID: ${newProject.id}`);
+      } catch (directRefError) {
+        logger.error(`[processRequirements] Failed to store direct project reference: ${directRefError}`);
+      }
+        
       // Store project archive if environment context is available
       if (context.env) {
-        const archiveKey = await storeProjectArchive(newProject.id, codegenResult.files, context);
+       logger.info('[processRequirements] Storing project archive', { projectId: newProject.id });
+       const archiveKey = await storeProjectArchive(newProject.id, codegenResult.files, context);
         if (archiveKey) {
           context.archiveKey = archiveKey;
-          logger.info(`Project archive stored with key: ${archiveKey}`);
+          logger.info(`[processRequirements] Project archive stored with key: ${archiveKey}`);
         }
       }
-      
-      // Handle deployment if requested
-      if (context.shouldDeploy) {
-        logger.info('Deploying new project');
         
-        try {
-          const { deploymentManager, availableTargets } = await configureDeploymentManager(context);
-          
-          const deployment = await deploymentManager.deployWithBestTarget({
-            projectName: newProject.name,
-            files: codegenResult.files,
-            projectId: newProject.id,
-            targetName: context.deploymentTarget,
-            metadata: context.deploymentOptions
-          });
-          
-          // Create a deployment entry
-          const deploymentEntry = {
-            id: deployment.id,
-            url: deployment.url,
-            provider: deployment.provider,
-            timestamp: Date.now(),
-            status: deployment.status
-          };
-          
-          // Save the deployment to the project
-          await projectManager.addDeployment(newProject.id, deploymentEntry);
-          
-          // Set deployment result in context
-          context.deploymentResult = {
-            id: deployment.id,
-            url: deployment.url,
-            status: deployment.status
-          };
-          
-          logger.info(`Deployment successful: ${deployment.provider} - ${deployment.url}`);
-        } catch (deployError) {
-          logger.error('Deployment failed:', deployError);
-          throw deployError;
-        }
-      }
-      
       return context;
     }
   } catch (error) {
@@ -805,39 +788,150 @@ function generateProjectName(requirements: string): string {
 export async function runRequirementsChain(
   request: Request
 ): Promise<RequirementsContext> {
-  logger.debug('Running requirements chain');
+  logger.info('[runRequirementsChain] Starting chain execution');
   
   try {
     // Parse the request to extract requirements and metadata
     let context = await parseRequest(null, request);
     
     if (!context) {
+      logger.error('[runRequirementsChain] Context is null after parseRequest');
       throw new Error('Failed to parse request');
     }
+    logger.info('[runRequirementsChain] Request parsed', { projectId: context.projectId, shouldDeploy: context.shouldDeploy });
     
     // Load project context
     context = await loadProjectContext(context, request);
+    logger.info('[runRequirementsChain] Project context loaded', { projectId: context.projectId, isNew: context.isNewProject });
     
     // Process requirements and generate code/project
+    logger.info('[runRequirementsChain] Calling processRequirements...');
     context = await processRequirements(context, request);
-    
-    logger.debug('Requirements chain completed successfully', {
-      projectId: context.projectId,
-      hasFiles: context.files ? Object.keys(context.files).length : 0,
-      hasDeployment: Boolean(context.deploymentResult)
+    logger.info('[runRequirementsChain] Returned from processRequirements', { 
+      projectId: context.projectId, 
+      filesGenerated: Object.keys(context.files || {}).length, 
+      archiveKey: context.archiveKey 
     });
     
+    // Deploy code if requested
+    logger.info('[runRequirementsChain] Preparing to call deployCode...', { shouldDeploy: context.shouldDeploy });
+    context = await deployCode(context); // Ensure deployCode is awaited
+    logger.info('[runRequirementsChain] Returned from deployCode', { deploymentStatus: context.deploymentResult?.status });
+    
+    logger.info('[runRequirementsChain] Chain execution finished successfully');
     return context;
   } catch (error) {
-    logger.error('Requirements chain failed:', error);
+    logger.error('[runRequirementsChain] Error during chain execution:', error);
+    // Rethrow or handle error as needed, potentially returning a context with error info
+    throw error;
+  }
+}
+
+export async function deployCode(context: RequirementsContext): Promise<RequirementsContext> {
+  logger.info('[deployCode] Entering deployment step', { projectId: context.projectId, shouldDeploy: context.shouldDeploy });
+  // Skip if deployment is not requested
+  if (!context.shouldDeploy) {
+    logger.debug('[deployCode] Deployment not requested, skipping...');
+    return context;
+  }
+  
+  try {
+    const deploymentManager = await configureDeploymentManager(context);
+    logger.info('[deployCode] DeploymentManager configured');
     
-    // Return error context
-    return {
-      content: '',
-      shouldDeploy: false,
-      error: error instanceof Error ? error : new Error(String(error)),
-      projectId: '',
-      isNewProject: false
-    };
+    // Prepare files for deployment
+    const files: Record<string, string> = {};
+    if (context.files && typeof context.files === 'object') {
+      Object.entries(context.files).forEach(([path, content]) => {
+        files[path] = content;
+      });
+    }
+    logger.debug('[deployCode] Prepared files for deployment', { fileCount: Object.keys(files).length });
+    
+    // Explicitly handle Netlify deployment if requested
+    let deployment;
+    const isNetlifyRequested = context.deploymentOptions?.targetName === 'netlify';
+    const hasNetlifyCredentials = !!context.deploymentOptions?.netlifyCredentials?.apiToken || 
+                                  !!context.deploymentOptions?.netlifyToken;
+    logger.debug('[deployCode] Checking Netlify deployment conditions', { isNetlifyRequested, hasNetlifyCredentials });
+
+    if (isNetlifyRequested && hasNetlifyCredentials) {
+      try {
+        logger.info('[deployCode] Attempting direct Netlify deployment');
+        // Import and create the target directly
+        const { NetlifyTarget } = await import('~/lib/deployment/targets/netlify');
+        const netlifyToken = context.deploymentOptions?.netlifyCredentials?.apiToken || 
+                           context.deploymentOptions?.netlifyToken;
+        
+        const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken as string });
+        
+        // Check if it's available with direct initialization
+        logger.debug('[deployCode] Checking direct Netlify target availability');
+        const isAvailable = await netlifyTarget.isAvailable();
+        if (isAvailable) {
+          logger.info('[deployCode] Direct Netlify target available, initializing project...');
+          
+          // Deploy directly to Netlify
+          const projectName = context.projectId ? `project-${context.projectId.substring(0, 8)}` : 'unnamed-project';
+          const netlifyProject = await netlifyTarget.initializeProject({
+            name: projectName,
+            files: files
+          });
+          logger.info('[deployCode] Netlify project initialized, starting deployment...', { netlifyProjectId: netlifyProject.id });
+          
+          deployment = await netlifyTarget.deploy({
+            projectId: netlifyProject.id,
+            projectName: netlifyProject.name,
+            files: files
+          });
+          
+          logger.info(`[deployCode] Direct Netlify deployment completed`, { deployment });
+        } else {
+           logger.warn('[deployCode] Direct Netlify target was NOT available after initialization');
+        }
+      } catch (netlifyError) {
+        logger.error('[deployCode] Error during direct Netlify deployment', netlifyError);
+        // Do not throw, allow fallback
+      }
+    }
+    
+    // Fall back to DeploymentManager if direct Netlify deployment was not attempted or failed
+    if (!deployment) {
+      logger.info('[deployCode] Falling back to DeploymentManager deployment');
+      const projectName = context.projectId ? `project-${context.projectId.substring(0, 8)}` : 'unnamed-project';
+      logger.info(`[deployCode] Deploying project ${projectName} with ID ${context.projectId || 'no-id'} via Manager`);
+      try {
+        deployment = await deploymentManager.deploymentManager.deployWithBestTarget({
+          projectName: projectName,
+          files: files,
+          targetName: context.deploymentOptions?.targetName,
+          projectId: context.projectId
+        });
+        logger.info('[deployCode] Deployment via Manager completed', { deployment });
+      } catch (managerError) {
+         logger.error('[deployCode] Error during DeploymentManager deployment', managerError);
+         // If manager also fails, return context without deployment result
+         return context;
+      }
+    }
+    
+    // Update context with deployment result if deployment was successful
+    if (deployment) {
+       logger.info('[deployCode] Updating context with deployment result', { deploymentId: deployment.id });
+       context.deploymentResult = {
+         id: deployment.id,
+         url: deployment.url,
+         status: deployment.status
+       };
+    } else {
+       logger.warn('[deployCode] Deployment object was unexpectedly null/undefined after attempting deployment');
+    }
+    
+    logger.info('[deployCode] Exiting deployment step');
+    return context;
+  } catch (error) {
+    logger.error('[deployCode] Uncaught error during deployment process:', error);
+    // Still return the context even if deployment failed
+    return context;
   }
 }

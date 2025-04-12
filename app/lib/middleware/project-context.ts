@@ -98,7 +98,7 @@ export async function handleProjectContext(
   const requirements = data.content || data.requirements;
   const userId = data.userId;
   
-  logger.debug('Processing project context', { projectId, userId });
+  logger.debug('[handleProjectContext] Processing project context', { projectId, userId });
   
   // Initialize the context
   const context: ProjectRequestContext = {
@@ -108,64 +108,79 @@ export async function handleProjectContext(
     updateRequirements: undefined
   };
   
+  logger.debug('[handleProjectContext] Initial context created', { context });
+  
   const projectManager = getProjectStateManager();
   
   // Handle existing project if an ID was provided
   if (projectId) {
     try {
+      logger.debug(`[handleProjectContext] Project ID provided: ${projectId}. Checking existence...`);
       // Check if the project exists
       const exists = await projectManager.projectExists(projectId);
+      logger.debug(`[handleProjectContext] Project ${projectId} exists: ${exists}`);
       
       if (exists) {
         // Load the existing project
+        logger.debug(`[handleProjectContext] Loading existing project: ${projectId}`);
         context.project = await projectManager.getProject(projectId);
         context.isNewProject = false;
         
         // If there are requirements, they are for updating the project
         if (requirements) {
+          logger.debug(`[handleProjectContext] Setting update requirements for project ${projectId}`);
           context.updateRequirements = requirements;
         }
         
-        logger.debug(`Loaded existing project: ${projectId}`);
+        logger.info(`[handleProjectContext] Loaded existing project: ${projectId}`);
         return context;
       } else if (options.requireExistingProject) {
         // Project doesn't exist but was required
+        logger.error(`[handleProjectContext] Required project not found: ${projectId}`);
         throw new Error(`Project not found: ${projectId}`);
       } else {
         // Project doesn't exist, but we'll create a new one with the provided ID
+        logger.warn(`[handleProjectContext] Project ${projectId} not found. Setting up for creation with this ID.`);
         context.isNewProject = true;
         context.projectId = projectId;
         
         if (requirements) {
+          logger.debug(`[handleProjectContext] Setting initial requirements for new project ${projectId}`);
           context.initialRequirements = requirements;
         }
       }
     } catch (error) {
-      logger.error(`Error loading project ${projectId}:`, error);
+      logger.error(`[handleProjectContext] Error loading project ${projectId}:`, error);
       
       if (options.requireExistingProject) {
         throw error;
       }
       
       // Set up for a new project
+      logger.warn(`[handleProjectContext] Error occurred, setting up for new project generation.`);
       context.isNewProject = true;
       context.projectId = generateProjectId();
       
       if (requirements) {
+        logger.debug(`[handleProjectContext] Setting initial requirements for newly generated project ID ${context.projectId}`);
         context.initialRequirements = requirements;
       }
     }
   } else {
     // No project ID was provided
+    logger.debug('[handleProjectContext] No project ID provided.');
     if (options.requireExistingProject) {
+      logger.error('[handleProjectContext] Project ID is required but was not provided.');
       throw new Error('Project ID is required');
     }
     
     // Set up for a new project
     context.isNewProject = true;
     context.projectId = generateProjectId();
+    logger.info(`[handleProjectContext] Generated new project ID: ${context.projectId}`);
     
     if (requirements) {
+      logger.debug(`[handleProjectContext] Setting initial requirements for new project ${context.projectId}`);
       context.initialRequirements = requirements;
     }
   }
@@ -174,6 +189,7 @@ export async function handleProjectContext(
   if (context.isNewProject && options.autoCreateProject && context.initialRequirements) {
     try {
       const projectName = options.defaultProjectName || `Project ${new Date().toLocaleString()}`;
+      logger.info(`[handleProjectContext] Auto-creating new project: ${projectName}`, { userId });
       
       context.project = await projectManager.createProject({
         name: projectName,
@@ -187,13 +203,14 @@ export async function handleProjectContext(
       
       // Update the project ID to match the newly created project
       context.projectId = context.project.id;
-      logger.debug(`Auto-created new project: ${context.projectId}`);
+      logger.info(`[handleProjectContext] Auto-created new project with ID: ${context.projectId}`);
     } catch (error) {
-      logger.error('Failed to auto-create project:', error);
+      logger.error('[handleProjectContext] Failed to auto-create project:', error);
       throw new Error('Failed to create project');
     }
   }
   
+  logger.info('[handleProjectContext] Finished processing', { projectId: context.projectId, isNew: context.isNewProject });
   return context;
 }
 

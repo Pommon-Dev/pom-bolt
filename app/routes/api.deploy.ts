@@ -123,23 +123,62 @@ export async function action({ request, context }: ActionFunctionArgs) {
     
     if (projectId && Object.keys(files).length === 0) {
       logger.debug(`Loading project files for ${projectId}`);
-      // Load project
-      const project = await projectManager.getProject(projectId);
-      if (!project) {
-        return json({ error: `Project ${projectId} not found` }, { status: 404 });
-      }
-      
-      deployProjectName = project.name;
-      
-      // Load project files
-      const projectFiles = await projectManager.getProjectFiles(projectId);
-      deployFiles = projectFiles.reduce((map, file) => {
-        map[file.path] = file.content;
-        return map;
-      }, {} as Record<string, string>);
-      
-      if (Object.keys(deployFiles).length === 0) {
-        return json({ error: `No files found for project ${projectId}` }, { status: 400 });
+      try {
+        // First, handle the case where projectId might be an archive key
+        let project;
+        let isArchiveKey = false;
+        
+        // Check if this is actually an archive key
+        if (projectId.startsWith('project-') && (projectId.includes('.zip') || projectId.includes('-'))) {
+          logger.info(`ProjectId appears to be an archive key: ${projectId}`);
+          isArchiveKey = true;
+          
+          // Extract the real project ID from the archive key
+          // Format: project-UUID-TIMESTAMP.zip
+          const uuidMatch = projectId.match(/project-([0-9a-f-]+)-\d+/);
+          if (uuidMatch && uuidMatch[1]) {
+            const extractedUuid = uuidMatch[1];
+            logger.info(`Extracted UUID from archive key: ${extractedUuid}`);
+            
+            // Try to load the project with the extracted UUID
+            try {
+              project = await projectManager.getProject(extractedUuid);
+              logger.info(`Successfully loaded project from extracted UUID: ${extractedUuid}`);
+            } catch (e) {
+              logger.warn(`Could not load project with extracted UUID: ${extractedUuid}`);
+            }
+          }
+        }
+        
+        // If we couldn't get a project from an archive key, try direct lookup
+        if (!project) {
+          try {
+            project = await projectManager.getProject(projectId);
+          } catch (e) {
+            logger.error(`Failed to load project: ${projectId}`, e);
+            return json({ error: `Project ${projectId} not found` }, { status: 404 });
+          }
+        }
+        
+        if (!project) {
+          return json({ error: `Project ${projectId} not found` }, { status: 404 });
+        }
+        
+        deployProjectName = project.name;
+        
+        // Load project files
+        const projectFiles = await projectManager.getProjectFiles(projectId);
+        deployFiles = projectFiles.reduce((map, file) => {
+          map[file.path] = file.content;
+          return map;
+        }, {} as Record<string, string>);
+        
+        if (Object.keys(deployFiles).length === 0) {
+          return json({ error: `No files found for project ${projectId}` }, { status: 400 });
+        }
+      } catch (error) {
+        logger.error(`[api.deploy] Error loading project files for ${projectId}: ${error}`);
+        return json({ error: `Failed to load project: ${error instanceof Error ? error.message : 'Unknown error'}` }, { status: 500 });
       }
     }
     
@@ -150,14 +189,57 @@ export async function action({ request, context }: ActionFunctionArgs) {
     const availableTargets = await deploymentManager.getAvailableTargets();
     logger.info(`Available deployment targets: ${availableTargets.join(', ')}`);
     
-    // Deploy with best target or specified target
-    const deployment = await deploymentManager.deployWithBestTarget({
-      projectName: deployProjectName,
-      files: deployFiles,
-      targetName,
-      projectId,
-      metadata: { ...metadata, environment: context } // Pass context for targets like local-zip
-    });
+    // If Netlify was specifically requested but isn't available, try direct initialization
+    let deployment;
+    if (targetName === 'netlify' && !availableTargets.includes('netlify') && netlifyToken) {
+      try {
+        logger.info('Netlify deployment was requested but not available. Attempting direct initialization...');
+        // Import and create the target directly
+        const { NetlifyTarget } = await import('~/lib/deployment/targets/netlify');
+        const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken });
+        
+        // Check if it's available with direct initialization
+        const isAvailable = await netlifyTarget.isAvailable();
+        if (isAvailable) {
+          logger.info('Direct Netlify target initialized successfully, proceeding with deployment');
+          
+          // Initialize the project
+          const netlifyProject = await netlifyTarget.initializeProject({
+            name: deployProjectName,
+            files: deployFiles,
+            metadata: { ...metadata }
+          });
+          
+          // Deploy using the initialized project
+          deployment = await netlifyTarget.deploy({
+            projectId: netlifyProject.id,
+            projectName: netlifyProject.name,
+            files: deployFiles,
+            metadata: { ...metadata, environment: context }
+          });
+          
+          logger.info(`Direct Netlify deployment successful: ${deployment.url}`);
+        } else {
+          logger.warn('Direct Netlify target initialization succeeded, but isAvailable check failed');
+        }
+      } catch (netlifyError) {
+        logger.error('Error during direct Netlify deployment', netlifyError);
+      }
+    }
+    
+    // If direct Netlify deployment didn't work or wasn't attempted, use the manager
+    if (!deployment) {
+      // Deploy with best target or specified target
+      deployment = await deploymentManager.deployWithBestTarget({
+        projectName: deployProjectName,
+        files: deployFiles,
+        targetName,
+        projectId,
+        metadata: { ...metadata, environment: context } // Pass context for targets like local-zip
+      });
+    }
+    
+    logger.info(`Deployment result: ${deployment.status}, URL: ${deployment.url}`);
     
     // If projectId was provided, save the deployment to the project
     if (projectId) {

@@ -51,6 +51,26 @@ export class CodegenService {
         existingFilesCount: Object.keys(existingFiles).length
       });
 
+      // --- BEGIN ADDED LOGGING ---
+      try {
+        logger.debug('[CodegenService] Received serverEnv - inspecting content:', {
+          hasServerEnv: !!serverEnv,
+          serverEnvType: typeof serverEnv,
+          serverEnvKeys: serverEnv ? Object.keys(serverEnv).join(',') : 'N/A',
+          hasOpenAiKey: serverEnv?.OPENAI_API_KEY !== undefined,
+          hasOpenAiModel: serverEnv?.OPENAI_DEFAULT_MODEL !== undefined,
+          hasPomBoltProjects: serverEnv?.POM_BOLT_PROJECTS !== undefined,
+          // Also check nested structure common in Cloudflare
+          hasNestedEnv: !!(serverEnv as any)?.env,
+          nestedEnvKeys: (serverEnv as any)?.env ? Object.keys((serverEnv as any).env).join(',') : 'N/A',
+          hasNestedOpenAiKey: (serverEnv as any)?.env?.OPENAI_API_KEY !== undefined,
+          hasNestedPomBoltProjects: (serverEnv as any)?.env?.POM_BOLT_PROJECTS !== undefined,
+        });
+      } catch (e: any) {
+         logger.error('[CodegenService] Error inspecting serverEnv:', e.message);
+      }
+      // --- END ADDED LOGGING ---
+
       logger.debug('Environment details for code generation:', {
         hasServerEnv: !!serverEnv,
         envType: typeof serverEnv,
