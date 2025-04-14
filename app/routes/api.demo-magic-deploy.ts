@@ -26,6 +26,8 @@ interface DemoMagicDeployBody {
   requirements: string;
   projectName?: string;
   netlifyCredentials?: { apiToken?: string };
+  githubCredentials?: { token?: string; owner?: string }; // Added GitHub credentials
+  deploymentTarget?: 'netlify' | 'netlify-github'; // Added support for netlify-github
 }
 
 // netlify-demo-flow: Main action function refactored to use the FULL requirements chain
@@ -34,19 +36,34 @@ export async function action({ request, context }: ActionFunctionArgs) {
   logger.info(`${logPrefix} Received request (Using runRequirementsChain Flow)`);
   
   try {
-    // --- Directly call the requirements chain runner --- 
-    // It handles parsing, context setup, codegen, persistence, and deployment
-    // We need to ensure the request body contains flags for deployment target/options
-    // which runRequirementsChain/parseRequest should pick up.
+    // Parse the request to extract credentials and other options
+    const requestData = await request.clone().json() as DemoMagicDeployBody;
     
-    // Note: We previously constructed reqContext manually. 
-    // runRequirementsChain does this internally based on the request body.
-    // Ensure the curl command sends `deploy: true`, `deploymentTarget: 'netlify'`, 
-    // and `deploymentOptions: { netlifyCredentials: {...} }` if needed by the chain's parser.
-    // (Or modify parseRequest in requirements-chain.ts if the demo body structure is different)
+    // Create a modified request with the appropriate structure for requirements chain
+    const chainRequestBody = {
+      content: requestData.requirements,
+      projectName: requestData.projectName,
+      deploy: true, // Always deploy
+      deploymentTarget: requestData.deploymentTarget || 'netlify', // Default to netlify
+      deploymentOptions: {
+        netlifyCredentials: requestData.netlifyCredentials,
+        githubCredentials: requestData.githubCredentials,
+        // Flag to setup GitHub if netlify-github is selected
+        setupGitHub: requestData.deploymentTarget === 'netlify-github'
+      }
+    };
     
-    logger.info(`${logPrefix} Calling runRequirementsChain...`);
-    const resultContext = await runRequirementsChain(request); // Call the main chain runner
+    // Create a new request with the modified body
+    const chainRequest = new Request(request.url, {
+      method: 'POST',
+      headers: new Headers({
+        'Content-Type': 'application/json'
+      }),
+      body: JSON.stringify(chainRequestBody)
+    });
+    
+    logger.info(`${logPrefix} Calling runRequirementsChain with target: ${chainRequestBody.deploymentTarget}`);
+    const resultContext = await runRequirementsChain(chainRequest); // Call the main chain runner
     logger.info(`${logPrefix} runRequirementsChain finished`, { 
         projectId: resultContext.projectId, 
         filesGenerated: !!resultContext.files, 

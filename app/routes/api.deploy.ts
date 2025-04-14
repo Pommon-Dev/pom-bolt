@@ -1,11 +1,9 @@
 import { json } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
-import { getDeploymentManager } from '~/lib/deployment/deployment-manager';
 import { getProjectStateManager } from '~/lib/projects';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
-import type { DeploymentTarget } from '~/lib/deployment/targets/base';
-import type { CloudflareConfig, DeploymentStatus } from '~/lib/deployment/types';
-import { getCloudflareCredentials, getNetlifyCredentials } from '~/lib/deployment/credentials';
+import type { DeploymentStatus } from '~/lib/deployment/types';
+import { getCloudflareCredentials, getNetlifyCredentials, getGitHubCredentials } from '~/lib/deployment/credentials';
 
 // Define the environment variables we expect from Cloudflare
 interface EnvWithCloudflare {
@@ -40,10 +38,12 @@ export async function action({ request, context }: ActionFunctionArgs) {
       projectId, 
       projectName = body.name || 'Untitled Project',
       files = {},
-      targetName,
+      targetName: requestedTargetName,
       metadata = {},
       cfCredentials, // Existing override for Cloudflare
-      netlifyCredentials // New: Allow directly passing Netlify credentials
+      netlifyCredentials, // Allow directly passing Netlify credentials
+      githubCredentials, // New: Allow directly passing GitHub credentials
+      setupGitHub = false  // New: Flag to indicate if we should set up GitHub repo first
     } = body;
 
     if (!projectId && Object.keys(files).length === 0) {
@@ -52,80 +52,79 @@ export async function action({ request, context }: ActionFunctionArgs) {
     
     logger.info(`Handling deployment request for ${projectId ? `project ID ${projectId}` : `project ${projectName}`}`);
 
+    // Import the DeploymentWorkflowService
+    const { getDeploymentWorkflowService } = await import('~/lib/deployment/deployment-workflow');
+    const deploymentWorkflowService = getDeploymentWorkflowService();
+
     // --- Credential Handling --- 
-    let cfConfig = getCloudflareCredentials(context);
-    let netlifyToken = getNetlifyCredentials(context).apiToken;
-    let credSource = netlifyToken ? 'environment/context' : 'none';
+    // Set up credentials object for the workflow service
+    const credentials: any = {};
+    let credSource = 'none';
 
-    // Log initial credential status before overrides
-    logger.debug('Initial credentials from environment:', {
-      hasCloudflareAccountId: !!cfConfig.accountId,
-      hasCloudflareApiToken: !!cfConfig.apiToken,
-      hasNetlifyToken: !!netlifyToken,
-      source: credSource
-    });
-
-    // Add detailed context logging for debugging
-    logger.debug('Context structure in api.deploy:', {
-      hasContext: !!context,
-      contextType: context ? typeof context : 'undefined',
-      hasEnv: !!context?.env,
-      envType: context?.env ? typeof context.env : 'undefined',
-      hasCloudflare: !!context?.cloudflare,
-      cloudflareEnvAvailable: !!context?.cloudflare?.env,
-      envKeys: context?.env ? Object.keys(context.env) : [],
-      cfEnvKeys: context?.cloudflare?.env ? Object.keys(context.cloudflare.env) : []
-    });
-
-    // Override Cloudflare credentials if provided in request
-    if (cfCredentials && cfCredentials.accountId && cfCredentials.apiToken) {
-      logger.debug('Using Cloudflare credentials provided in request body');
-      cfConfig = {
-        ...cfConfig,
+    // Cloudflare credentials
+    const cfConfig = getCloudflareCredentials(context);
+    if (cfConfig.accountId && cfConfig.apiToken) {
+      credentials.cloudflare = cfConfig;
+      credSource = 'environment/context';
+    } else if (cfCredentials && cfCredentials.accountId && cfCredentials.apiToken) {
+      credentials.cloudflare = {
         accountId: cfCredentials.accountId,
         apiToken: cfCredentials.apiToken,
-        projectName: cfCredentials.projectName || cfConfig.projectName || 'genapps'
+        projectName: cfCredentials.projectName || 'genapps'
       };
       credSource = 'request (Cloudflare)';
     }
     
-    // Only override Netlify token from request if not already set from environment
-    if (!netlifyToken && netlifyCredentials && netlifyCredentials.apiToken) {
-      logger.debug('Using Netlify token from request body (no token found in environment)');
-      netlifyToken = netlifyCredentials.apiToken;
-      credSource = 'request (Netlify)';
+    // Netlify credentials
+    const netlifyToken = getNetlifyCredentials(context).apiToken;
+    if (netlifyToken) {
+      credentials.netlify = {
+        apiToken: netlifyToken
+      };
+      if (credSource === 'none') credSource = 'environment/context';
     } else if (netlifyCredentials && netlifyCredentials.apiToken) {
-      logger.debug('Ignoring Netlify token from request body (using token from environment)');
+      credentials.netlify = {
+        apiToken: netlifyCredentials.apiToken
+      };
+      if (credSource === 'none') credSource = 'request (Netlify)';
+    }
+
+    // GitHub credentials
+    const githubCreds = getGitHubCredentials(context);
+    if (githubCreds.token) {
+      credentials.github = githubCreds;
+      if (credSource === 'none') credSource = 'environment/context';
+    } else if (githubCredentials && githubCredentials.token) {
+      credentials.github = {
+        token: githubCredentials.token,
+        owner: githubCredentials.owner || githubCreds.owner
+      };
+      if (credSource === 'none') credSource = 'request (GitHub)';
     }
     // --- End Credential Handling ---
     
     // Log credentials status (redacted)
     logger.debug('Credentials status:', {
-      cfHasAccountId: !!cfConfig.accountId,
-      cfHasApiToken: !!cfConfig.apiToken,
-      cfComplete: !!(cfConfig.accountId && cfConfig.apiToken),
-      netlifyHasToken: !!netlifyToken,
+      cfHasAccountId: !!credentials.cloudflare?.accountId,
+      cfHasApiToken: !!credentials.cloudflare?.apiToken,
+      cfComplete: !!(credentials.cloudflare?.accountId && credentials.cloudflare?.apiToken),
+      netlifyHasToken: !!credentials.netlify?.apiToken,
+      githubHasToken: !!credentials.github?.token,
       source: credSource
     });
 
-    // Get managers, initializing DeploymentManager with potentially overridden credentials
+    // Get project manager to load project files if needed
     const projectManager = getProjectStateManager();
-    const deploymentManager = await getDeploymentManager({
-      cloudflareConfig: cfConfig.accountId && cfConfig.apiToken 
-        ? cfConfig as CloudflareConfig 
-        : undefined,
-      netlifyToken: netlifyToken || undefined // Pass the potentially overridden token
-    });
 
     // If projectId is provided but files aren't, load files from storage
     let deployFiles = files;
     let deployProjectName = projectName;
+    let project;
     
     if (projectId && Object.keys(files).length === 0) {
       logger.debug(`Loading project files for ${projectId}`);
       try {
         // First, handle the case where projectId might be an archive key
-        let project;
         let isArchiveKey = false;
         
         // Check if this is actually an archive key
@@ -182,67 +181,26 @@ export async function action({ request, context }: ActionFunctionArgs) {
       }
     }
     
-    // Deploy the project
-    logger.info(`Deploying project ${deployProjectName} with ${Object.keys(deployFiles).length} files`);
+    // Deploy using the DeploymentWorkflowService
+    logger.info(`Deploying project ${deployProjectName} with ${Object.keys(deployFiles).length} files using DeploymentWorkflowService`);
     
-    // First check what deployment targets are available
-    const availableTargets = await deploymentManager.getAvailableTargets();
-    logger.info(`Available deployment targets: ${availableTargets.join(', ')}`);
-    
-    // If Netlify was specifically requested but isn't available, try direct initialization
-    let deployment;
-    if (targetName === 'netlify' && !availableTargets.includes('netlify') && netlifyToken) {
-      try {
-        logger.info('Netlify deployment was requested but not available. Attempting direct initialization...');
-        // Import and create the target directly
-        const { NetlifyTarget } = await import('~/lib/deployment/targets/netlify');
-        const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken });
-        
-        // Check if it's available with direct initialization
-        const isAvailable = await netlifyTarget.isAvailable();
-        if (isAvailable) {
-          logger.info('Direct Netlify target initialized successfully, proceeding with deployment');
-          
-          // Initialize the project
-          const netlifyProject = await netlifyTarget.initializeProject({
-            name: deployProjectName,
-            files: deployFiles,
-            metadata: { ...metadata }
-          });
-          
-          // Deploy using the initialized project
-          deployment = await netlifyTarget.deploy({
-            projectId: netlifyProject.id,
-            projectName: netlifyProject.name,
-            files: deployFiles,
-            metadata: { ...metadata, environment: context }
-          });
-          
-          logger.info(`Direct Netlify deployment successful: ${deployment.url}`);
-        } else {
-          logger.warn('Direct Netlify target initialization succeeded, but isAvailable check failed');
-        }
-      } catch (netlifyError) {
-        logger.error('Error during direct Netlify deployment', netlifyError);
+    const deployment = await deploymentWorkflowService.deployProject({
+      projectId: projectId || `temp-${Date.now()}`,
+      projectName: deployProjectName,
+      files: deployFiles,
+      targetName: requestedTargetName, 
+      setupGitHub,
+      credentials,
+      metadata: { 
+        ...metadata, 
+        environment: context
       }
-    }
-    
-    // If direct Netlify deployment didn't work or wasn't attempted, use the manager
-    if (!deployment) {
-      // Deploy with best target or specified target
-      deployment = await deploymentManager.deployWithBestTarget({
-        projectName: deployProjectName,
-        files: deployFiles,
-        targetName,
-        projectId,
-        metadata: { ...metadata, environment: context } // Pass context for targets like local-zip
-      });
-    }
+    });
     
     logger.info(`Deployment result: ${deployment.status}, URL: ${deployment.url}`);
     
     // If projectId was provided, save the deployment to the project
-    if (projectId) {
+    if (projectId && project) {
       await projectManager.addDeployment(projectId, {
         url: deployment.url,
         provider: deployment.provider,
@@ -281,9 +239,12 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   }
   
   try {
+    // Get deployment manager to check status
+    const { getDeploymentManager } = await import('~/lib/deployment/deployment-manager');
+    
     // Get cloudflare environment variables safely
     const env = context?.cloudflare?.env as EnvWithCloudflare || {};
-    const cfConfig: Partial<CloudflareConfig> = {};
+    const cfConfig: any = {};
     
     if (typeof env.CLOUDFLARE_ACCOUNT_ID === 'string') {
       cfConfig.accountId = env.CLOUDFLARE_ACCOUNT_ID;
@@ -295,7 +256,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
     const deploymentManager = await getDeploymentManager({
       cloudflareConfig: cfConfig.accountId && cfConfig.apiToken 
-        ? cfConfig as CloudflareConfig 
+        ? cfConfig 
         : undefined
     });
     

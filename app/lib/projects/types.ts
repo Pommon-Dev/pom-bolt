@@ -4,6 +4,19 @@
  */
 
 /**
+ * GitHub repository information for projects
+ */
+export interface GitHubRepositoryInfo {
+  owner: string;            // GitHub username or organization
+  repo: string;             // Repository name
+  fullName: string;         // Full repository name (owner/repo)
+  url: string;              // Repository URL
+  defaultBranch: string;    // Default branch (usually 'main' or 'master')
+  isPrivate: boolean;       // Whether the repository is private
+  commitSha?: string;       // Latest commit SHA
+}
+
+/**
  * Represents the state of a project file
  */
 export interface ProjectFile {

@@ -35,10 +35,10 @@ Save the `projectId` from the response for use in subsequent steps.
 curl -X POST https://23d4935a.pom-bolt.pages.dev/api/deploy \
   -H "Content-Type: application/json" \
   -d '{
-    "projectId": "YOUR_PROJECT_ID",
+    "projectId": "1a337717-d9eb-42a1-b6f1-bde04da47420",
     "targetName": "netlify",
     "netlifyCredentials": {
-      "apiToken": "YOUR_NETLIFY_TOKEN"
+      "apiToken": "nfp_PvdZJ7GfrLyf5ZdnogBRMHQzK1emNPZK9f7b"
     }
   }'
 ```
@@ -118,7 +118,7 @@ First, we need to confirm if there's an archive key available from a previous re
 curl -X POST https://23d4935a.pom-bolt.pages.dev/api/requirements \
   -H "Content-Type: application/json" \
   -d '{
-    "projectId": "YOUR_PROJECT_ID",
+    "projectId": "1a337717-d9eb-42a1-b6f1-bde04da47420",
     "content": "",
     "additionalRequirement": false,
     "deploy": false

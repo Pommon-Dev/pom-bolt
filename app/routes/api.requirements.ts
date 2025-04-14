@@ -1,7 +1,12 @@
 import { json } from '@remix-run/cloudflare';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
-import { runRequirementsChain, loadProjectContext, processRequirements, type RequirementsContext } from '~/lib/middleware/requirements-chain';
+import { 
+  loadProjectContext, 
+  processRequirements, 
+  deployCode,
+  type RequirementsContext 
+} from '~/lib/middleware/requirements-chain';
 
 const logger = createScopedLogger('api-requirements');
 
@@ -30,118 +35,112 @@ export async function loader({ request }: LoaderFunctionArgs) {
  */
 export async function action({ request, context }: ActionFunctionArgs) {
   try {
-    logger.info('Processing requirements request');
+    logger.info('🚀 [api.requirements] Processing requirements request');
     
-    // Debug: Log request information and context
-    logger.debug('Request headers:', {
+    // Debug request headers
+    logger.debug('[api.requirements] Request headers:', {
       contentType: request.headers.get('Content-Type'),
       contentLength: request.headers.get('Content-Length'),
       accept: request.headers.get('Accept')
     });
     
-    logger.debug('Context information:', {
-      hasContext: !!context,
-      contextType: typeof context,
-      contextKeys: context ? Object.keys(context as any).join(',') : 'none',
-      hasEnv: !!(context as any)?.env,
-      envType: (context as any)?.env ? typeof (context as any).env : 'undefined'
-    });
-    
-    // Manually parse the request body
+    // Parse the request body once
     let reqBody;
     try {
       const clonedRequest = request.clone();
       const rawBody = await clonedRequest.text();
-      logger.debug('Raw request body:', { 
+      
+      logger.debug('[api.requirements] Raw request body:', { 
         length: rawBody.length,
-        preview: rawBody.substring(0, 100),
-        isJson: rawBody.trim().startsWith('{')
+        preview: rawBody.substring(0, 100) + (rawBody.length > 100 ? '...' : '')
       });
       
-      // Try parsing JSON directly
       if (rawBody.trim().startsWith('{')) {
         try {
           reqBody = JSON.parse(rawBody);
-          logger.debug('Parsed JSON body directly:', {
-            hasContent: Boolean(reqBody.content || reqBody.requirements),
-            contentType: reqBody.content ? 'content' : reqBody.requirements ? 'requirements' : 'none',
-            keys: Object.keys(reqBody),
-            additionalRequirement: Boolean(reqBody.additionalRequirement)
+          logger.info('[api.requirements] Request body properties:', {
+            shouldDeploy: !!reqBody.shouldDeploy,
+            deploymentTarget: reqBody.deploymentTarget || 'not specified',
+            hasGithubCreds: !!reqBody.githubCredentials,
+            hasNetlifyCreds: !!reqBody.netlifyCredentials,
+            setupGitHub: !!reqBody.setupGitHub
           });
-        } catch (jsonError) {
-          logger.error('Failed to parse JSON directly:', jsonError);
-          // Use the raw body as content if JSON parse fails
+        } catch (e) {
+          logger.warn('[api.requirements] Failed to parse JSON body:', e);
           reqBody = { content: rawBody };
         }
       } else {
-        // Use the raw body as content
         reqBody = { content: rawBody };
       }
-    } catch (bodyError) {
-      logger.error('Failed to read raw request body:', bodyError);
+    } catch (e) {
+      logger.error('[api.requirements] Failed to read request body:', e);
       return json({ 
         success: false, 
         error: 'Failed to read request body' 
       }, { status: 400 });
     }
     
-    // Create initial requirements context with parsed body
-    const reqContext: RequirementsContext = {
+    // Create initial requirements context with safe deploymentOptions
+    const deploymentOptions: Record<string, any> = reqBody.deploymentOptions || {};
+    
+    // Handle direct credential properties by moving them to deploymentOptions
+    if (reqBody.githubCredentials) {
+      deploymentOptions.githubCredentials = reqBody.githubCredentials;
+    }
+    
+    if (reqBody.setupGitHub) {
+      deploymentOptions.setupGitHub = Boolean(reqBody.setupGitHub);
+    }
+    
+    if (reqBody.netlifyCredentials) {
+      deploymentOptions.netlifyCredentials = reqBody.netlifyCredentials;
+    }
+    
+    if (reqBody.cfCredentials) {
+      deploymentOptions.cfCredentials = reqBody.cfCredentials;
+    }
+    
+    const initialContext: RequirementsContext = {
       content: reqBody.content || reqBody.requirements || '',
       projectId: reqBody.projectId || reqBody.id || '',
       isNewProject: !reqBody.projectId && !reqBody.id,
+      shouldDeploy: Boolean(reqBody.shouldDeploy || reqBody.deploy || reqBody.deployment || reqBody.deployTarget),
+      deploymentTarget: reqBody.deploymentTarget || reqBody.deployTarget,
+      deploymentOptions,
+      files: {},
       additionalRequirement: Boolean(reqBody.additionalRequirement),
       userId: reqBody.userId,
-      shouldDeploy: Boolean(reqBody.deploy || reqBody.deployment || reqBody.deployTarget),
-      deploymentTarget: reqBody.deployTarget || reqBody.deploymentTarget,
-      deploymentOptions: reqBody.deploymentOptions || {}, // Include deploymentOptions from the request
-      files: {},
-      env: (context as any) || {} // Pass the entire context to ensure KV bindings work
+      env: (context as any)?.env
     };
     
-    // If netlifyCredentials was provided at the top level, move it to deploymentOptions
-    if (reqBody.netlifyCredentials) {
-      reqContext.deploymentOptions = reqContext.deploymentOptions || {};
-      reqContext.deploymentOptions.netlifyCredentials = reqBody.netlifyCredentials;
-    }
-    
-    // If cfCredentials was provided at the top level, move it to deploymentOptions
-    if (reqBody.cfCredentials) {
-      reqContext.deploymentOptions = reqContext.deploymentOptions || {};
-      reqContext.deploymentOptions.cfCredentials = reqBody.cfCredentials;
-    }
-    
-    // If Cloudflare context has env, add it to the requirements context
-    if ((context as any)?.env) {
-      reqContext.env = (context as any).env;
-    }
-    
-    logger.debug('Initial request context:', {
-      hasContent: Boolean(reqContext.content),
-      contentLength: reqContext.content ? reqContext.content.length : 0,
-      projectId: reqContext.projectId || '(none)',
-      isNewProject: reqContext.isNewProject,
-      additionalRequirement: reqContext.additionalRequirement,
-      hasEnv: !!reqContext.env,
-      shouldDeploy: reqContext.shouldDeploy,
-      deploymentTarget: reqContext.deploymentTarget
+    logger.info('🔄 [api.requirements] Running requirements chain with context:', {
+      hasContent: initialContext.content.length > 0,
+      projectId: initialContext.projectId || 'new project',
+      shouldDeploy: initialContext.shouldDeploy,
+      deploymentTarget: initialContext.deploymentTarget || 'auto',
+      hasOptions: Object.keys(deploymentOptions).length > 0
     });
     
-    // Load project context to handle project identification
-    // Pass the manually parsed body to avoid parsing issues
-    const projectContext = await loadProjectContext(reqContext, request);
+    // Load project context
+    let projectContext = await loadProjectContext(initialContext, request);
     
-    // Ensure we pass the context to the project context
-    projectContext.env = reqContext.env;
+    // Process requirements
+    let result = await processRequirements(projectContext, request);
     
-    logger.debug('Project context after loading:', {
-      projectId: projectContext.projectId,
-      isNewProject: projectContext.isNewProject,
-      hasEnv: !!projectContext.env
+    // Handle deployment if requested
+    if (result.shouldDeploy) {
+      logger.info('[api.requirements] Starting deployment process');
+      result = await deployCode(result);
+    } else {
+      logger.info('[api.requirements] Skipping deployment (not requested)');
+    }
+    
+    logger.info('✅ [api.requirements] Processing completed', {
+      projectId: result.projectId,
+      filesGenerated: result.files ? Object.keys(result.files).length : 0,
+      deploymentStatus: result.deploymentResult?.status || 'not requested',
+      deploymentUrl: result.deploymentResult?.url || 'N/A'
     });
-    
-    // Process the requirements and generate code
-    const result = await processRequirements(projectContext, request);
     
     // Return the result
     return json({
@@ -154,7 +153,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
       error: result.error ? result.error.message : undefined
     });
   } catch (error) {
-    logger.error('Error processing requirements:', error);
+    logger.error('❌ [api.requirements] Error processing requirements:', error);
     return json({
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error processing requirements',

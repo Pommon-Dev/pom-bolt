@@ -11,6 +11,9 @@ import { getProjectStateManager } from '~/lib/projects';
 import { handleProjectContext } from './project-context';
 import type { ProjectRequestContext } from './project-context';
 import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
+import type { DeploymentResult } from '~/lib/deployment/types';
+import { getCloudflareCredentials, getNetlifyCredentials, getGitHubCredentials } from '~/lib/deployment/credentials';
+import type { ActionFunctionArgs } from '@remix-run/cloudflare';
 
 // Define ChatRequest type locally since we can't import it
 interface ChatRequest {
@@ -67,96 +70,63 @@ export async function parseRequest(
     });
     
     // Parse request body
+    const contentType = request.headers.get('Content-Type') || '';
     let body: any = {};
-    const contentType = request.headers.get('content-type') || '';
 
-    // Try multiple parsing strategies
     if (contentType.includes('application/json')) {
       try {
-        // Try to parse as JSON
-        body = await request.json();
-        logger.debug('Successfully parsed JSON body', { 
-          keys: Object.keys(body),
-          hasContent: Boolean(body.content || body.requirements)
-        });
-      } catch (jsonError) {
-        logger.error('Error parsing JSON body', jsonError);
-        
-        // Fallback to text parsing
+        const requestBodyText = await request.text();
         try {
-          const textBody = await request.clone().text();
-          logger.debug('Raw request body', {
-            length: textBody.length,
-            preview: textBody.substring(0, 100)
+          body = JSON.parse(requestBodyText);
+          logger.debug('[parseRequest] Successfully parsed JSON body', { 
+            keys: Object.keys(body).join(','),
+            contentLength: requestBodyText.length,
+            shouldDeploy: body.shouldDeploy,
+            deploy: body.deploy,
+            deployment: body.deployment,
+            deployTarget: body.deployTarget,
+            deploymentTarget: body.deploymentTarget,
+            setupGitHub: body.setupGitHub,
+            hasGithubCredentials: !!body.githubCredentials,
+            hasNetlifyCredentials: !!body.netlifyCredentials
           });
-          
-          // Try to manually parse JSON
-          try {
-            body = JSON.parse(textBody);
-            logger.debug('Manually parsed JSON body', {
-              keys: Object.keys(body)
-            });
-          } catch (parseError) {
-            logger.error('Failed to manually parse JSON', parseError);
-          }
-        } catch (textError) {
-          logger.error('Failed to get text body', textError);
+        } catch (parseError) {
+          logger.error('[parseRequest] Failed to parse request body as JSON:', parseError);
+          // Treat as plain text
+          body = { content: requestBodyText };
         }
+      } catch (bodyError) {
+        logger.error('[parseRequest] Failed to read request body:', bodyError);
+        throw new Error('Failed to read request body');
       }
     } else if (contentType.includes('multipart/form-data') || contentType.includes('application/x-www-form-urlencoded')) {
-      try {
-        // Handle form data
-        const formData = await request.formData();
-        body = Object.fromEntries(formData.entries());
-        logger.debug('Successfully parsed form data', {
-          keys: Object.keys(body)
-        });
-      } catch (formError) {
-        logger.error('Error parsing form data', formError);
-      }
+      // Handle form data
+      const formData = await request.formData();
+      body = Object.fromEntries(formData.entries());
+      logger.debug('[parseRequest] Parsed form data body', { keys: Object.keys(body).join(',') });
     } else {
-      // Try text for unknown content types
-      try {
-        const textBody = await request.text();
-        logger.debug('Raw text body for unknown content type', {
-          length: textBody.length,
-          preview: textBody.substring(0, 100)
-        });
-        
-        // Try to parse as JSON if it looks like JSON
-        if (textBody.trim().startsWith('{')) {
-          try {
-            body = JSON.parse(textBody);
-            logger.debug('Parsed text as JSON', {
-              keys: Object.keys(body)
-            });
-          } catch (parseError) {
-            logger.error('Failed to parse text as JSON', parseError);
-            // Fallback to treating the whole text as content
-            body = { content: textBody };
-          }
-        } else {
-          // Fallback to treating the whole text as content
-          body = { content: textBody };
-        }
-      } catch (textError) {
-        logger.error('Failed to get text body', textError);
-      }
+      // Handle plain text or other formats
+      const content = await request.text();
+      body = { content };
+      logger.debug('[parseRequest] Parsed plain text body', { contentLength: content.length });
     }
 
-    // Get the requirements content
-    const content = body.content || body.requirements;
+    // Extract content (requirements)
+    const content = body.content || body.requirements || '';
     
-    if (!content || typeof content !== 'string') {
-      logger.error('Requirements content missing or invalid', {
-        contentType: typeof content,
-        bodyKeys: Object.keys(body)
-      });
-      throw new Error('Requirements content is required and must be a string');
-    }
+    // Extract deployment flags
+    const shouldDeploy = Boolean(body.shouldDeploy || body.deploy || body.deployment || body.deployTarget || body.deploymentTarget);
+    
+    logger.info('[parseRequest] Deployment flags in request:', {
+      shouldDeploy,
+      bodyHasShouldDeploy: !!body.shouldDeploy,
+      bodyHasDeploy: !!body.deploy,
+      bodyHasDeployment: !!body.deployment, 
+      bodyHasDeployTarget: !!body.deployTarget,
+      deploymentTarget: body.deploymentTarget || body.deployTarget || 'none'
+    });
     
     // Extract deployment settings if present
-    const shouldDeploy = Boolean(body.deploy || body.deployment);
     const deploymentTarget = 
       typeof body.deploymentTarget === 'string' ? body.deploymentTarget : 
       typeof body.deployment?.platform === 'string' ? body.deployment.platform :
@@ -788,150 +758,233 @@ function generateProjectName(requirements: string): string {
 export async function runRequirementsChain(
   request: Request
 ): Promise<RequirementsContext> {
-  logger.info('[runRequirementsChain] Starting chain execution');
+  logger.info('🚀 [runRequirementsChain] Starting chain execution');
   
   try {
     // Parse the request to extract requirements and metadata
     let context = await parseRequest(null, request);
     
     if (!context) {
-      logger.error('[runRequirementsChain] Context is null after parseRequest');
+      logger.error('❌ [runRequirementsChain] Context is null after parseRequest');
       throw new Error('Failed to parse request');
     }
-    logger.info('[runRequirementsChain] Request parsed', { projectId: context.projectId, shouldDeploy: context.shouldDeploy });
+    
+    // Log the parsed request data
+    logger.info('📋 [runRequirementsChain] Request parsed', { 
+      projectId: context.projectId || 'new-project', 
+      shouldDeploy: context.shouldDeploy,
+      deploymentTarget: context.deploymentTarget || 'auto',
+      hasGithubCreds: !!context.deploymentOptions?.githubCredentials,
+      hasNetlifyCreds: !!context.deploymentOptions?.netlifyCredentials,
+      setupGitHub: !!context.deploymentOptions?.setupGitHub
+    });
     
     // Load project context
     context = await loadProjectContext(context, request);
-    logger.info('[runRequirementsChain] Project context loaded', { projectId: context.projectId, isNew: context.isNewProject });
+    logger.info('📂 [runRequirementsChain] Project context loaded', { 
+      projectId: context.projectId, 
+      isNew: context.isNewProject 
+    });
     
     // Process requirements and generate code/project
-    logger.info('[runRequirementsChain] Calling processRequirements...');
+    logger.info('⚙️ [runRequirementsChain] Calling processRequirements...');
     context = await processRequirements(context, request);
-    logger.info('[runRequirementsChain] Returned from processRequirements', { 
+    logger.info('✅ [runRequirementsChain] Returned from processRequirements', { 
       projectId: context.projectId, 
       filesGenerated: Object.keys(context.files || {}).length, 
       archiveKey: context.archiveKey 
     });
     
     // Deploy code if requested
-    logger.info('[runRequirementsChain] Preparing to call deployCode...', { shouldDeploy: context.shouldDeploy });
-    context = await deployCode(context); // Ensure deployCode is awaited
-    logger.info('[runRequirementsChain] Returned from deployCode', { deploymentStatus: context.deploymentResult?.status });
+    if (context.shouldDeploy) {
+      logger.info('🚀 [runRequirementsChain] shouldDeploy=true, calling deployCode...', {
+        deploymentTarget: context.deploymentTarget || 'auto',
+        options: Object.keys(context.deploymentOptions || {}).join(',')
+      });
+      
+      // Ensure any deploymentOptions are properly set
+      const deployOptionsCheck = context.deploymentOptions || {};
+      logger.debug('🔍 [runRequirementsChain] Deployment options:', {
+        hasGithubCreds: !!deployOptionsCheck.githubCredentials,
+        hasNetlifyCreds: !!deployOptionsCheck.netlifyCredentials,
+        setupGitHub: !!deployOptionsCheck.setupGitHub
+      });
+      
+      try {
+        context = await deployCode(context);
+        logger.info('🏁 [runRequirementsChain] Returned from deployCode', { 
+          deploymentStatus: context.deploymentResult?.status,
+          deploymentUrl: context.deploymentResult?.url 
+        });
+      } catch (deployError) {
+        logger.error('❌ [runRequirementsChain] Error in deployCode:', deployError);
+        if (!context.error) {
+          context.error = deployError instanceof Error ? deployError : new Error(String(deployError));
+        }
+      }
+    } else {
+      logger.info('⏩ [runRequirementsChain] shouldDeploy=false, skipping deployment');
+    }
     
-    logger.info('[runRequirementsChain] Chain execution finished successfully');
+    logger.info('🎉 [runRequirementsChain] Chain execution finished successfully');
     return context;
   } catch (error) {
-    logger.error('[runRequirementsChain] Error during chain execution:', error);
-    // Rethrow or handle error as needed, potentially returning a context with error info
-    throw error;
+    logger.error('❌ [runRequirementsChain] Error during chain execution:', error);
+    // Create a minimal context with error information
+    const errorContext: RequirementsContext = {
+      content: '',
+      projectId: '', // Add required projectId field
+      shouldDeploy: false,
+      isNewProject: false,
+      files: {},
+      error: error instanceof Error ? error : new Error(String(error))
+    };
+    return errorContext;
   }
 }
 
+/**
+ * Deploy code to the selected target or best available one
+ */
 export async function deployCode(context: RequirementsContext): Promise<RequirementsContext> {
-  logger.info('[deployCode] Entering deployment step', { projectId: context.projectId, shouldDeploy: context.shouldDeploy });
-  // Skip if deployment is not requested
-  if (!context.shouldDeploy) {
-    logger.debug('[deployCode] Deployment not requested, skipping...');
-    return context;
-  }
-  
-  try {
-    const deploymentManager = await configureDeploymentManager(context);
-    logger.info('[deployCode] DeploymentManager configured');
-    
-    // Prepare files for deployment
-    const files: Record<string, string> = {};
-    if (context.files && typeof context.files === 'object') {
-      Object.entries(context.files).forEach(([path, content]) => {
-        files[path] = content;
-      });
-    }
-    logger.debug('[deployCode] Prepared files for deployment', { fileCount: Object.keys(files).length });
-    
-    // Explicitly handle Netlify deployment if requested
-    let deployment;
-    const isNetlifyRequested = context.deploymentOptions?.targetName === 'netlify';
-    const hasNetlifyCredentials = !!context.deploymentOptions?.netlifyCredentials?.apiToken || 
-                                  !!context.deploymentOptions?.netlifyToken;
-    logger.debug('[deployCode] Checking Netlify deployment conditions', { isNetlifyRequested, hasNetlifyCredentials });
+  logger.info('🚀 [deployCode] Starting deployment process', {
+    projectId: context.projectId,
+    projectName: context.project?.name,
+    filesCount: context.files ? Object.keys(context.files).length : 0,
+    deploymentTarget: context.deploymentTarget || 'auto'
+  });
 
-    if (isNetlifyRequested && hasNetlifyCredentials) {
-      try {
-        logger.info('[deployCode] Attempting direct Netlify deployment');
-        // Import and create the target directly
-        const { NetlifyTarget } = await import('~/lib/deployment/targets/netlify');
-        const netlifyToken = context.deploymentOptions?.netlifyCredentials?.apiToken || 
-                           context.deploymentOptions?.netlifyToken;
-        
-        const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken as string });
-        
-        // Check if it's available with direct initialization
-        logger.debug('[deployCode] Checking direct Netlify target availability');
-        const isAvailable = await netlifyTarget.isAvailable();
-        if (isAvailable) {
-          logger.info('[deployCode] Direct Netlify target available, initializing project...');
-          
-          // Deploy directly to Netlify
-          const projectName = context.projectId ? `project-${context.projectId.substring(0, 8)}` : 'unnamed-project';
-          const netlifyProject = await netlifyTarget.initializeProject({
-            name: projectName,
-            files: files
-          });
-          logger.info('[deployCode] Netlify project initialized, starting deployment...', { netlifyProjectId: netlifyProject.id });
-          
-          deployment = await netlifyTarget.deploy({
-            projectId: netlifyProject.id,
-            projectName: netlifyProject.name,
-            files: files
-          });
-          
-          logger.info(`[deployCode] Direct Netlify deployment completed`, { deployment });
-        } else {
-           logger.warn('[deployCode] Direct Netlify target was NOT available after initialization');
-        }
-      } catch (netlifyError) {
-        logger.error('[deployCode] Error during direct Netlify deployment', netlifyError);
-        // Do not throw, allow fallback
+  try {
+    // Check if we have files to deploy
+    if (!context.files || Object.keys(context.files).length === 0) {
+      logger.warn('⚠️ [deployCode] No files to deploy, aborting');
+      return context;
+    }
+    
+    // Import the DeploymentWorkflowService
+    const { getDeploymentWorkflowService } = await import('~/lib/deployment/deployment-workflow');
+    const deploymentWorkflowService = getDeploymentWorkflowService();
+    
+    // Extract credentials from context and deployment options
+    const deploymentOptions = context.deploymentOptions || {};
+    const env = context.env || {};
+    
+    // Log deployment options
+    logger.debug('🔍 [deployCode] Deployment options:', { 
+      keys: Object.keys(deploymentOptions),
+      hasGithubCreds: !!deploymentOptions.githubCredentials,
+      hasNetlifyCreds: !!deploymentOptions.netlifyCredentials,
+      setupGitHub: !!deploymentOptions.setupGitHub
+    });
+    
+    // Set up credentials object for the workflow service
+    const credentials: any = {};
+    
+    // Cloudflare credentials
+    const cfCreds = getCloudflareCredentials({ env });
+    if (cfCreds.accountId && cfCreds.apiToken) {
+      logger.debug('[deployCode] Using Cloudflare credentials from environment');
+      credentials.cloudflare = cfCreds;
+    } else if (deploymentOptions.cfCredentials) {
+      logger.debug('[deployCode] Using Cloudflare credentials from request');
+      credentials.cloudflare = deploymentOptions.cfCredentials;
+    }
+    
+    // Netlify credentials
+    const netlifyCredentials = getNetlifyCredentials({ env });
+    if (netlifyCredentials.apiToken) {
+      logger.debug('[deployCode] Using Netlify credentials from environment');
+      credentials.netlify = {
+        apiToken: netlifyCredentials.apiToken
+      };
+    } else if (deploymentOptions.netlifyCredentials) {
+      logger.debug('[deployCode] Using Netlify credentials from request');
+      credentials.netlify = deploymentOptions.netlifyCredentials;
+    }
+    
+    // GitHub credentials
+    const githubCredentials = getGitHubCredentials({ env });
+    if (githubCredentials.token) {
+      logger.debug('[deployCode] Using GitHub credentials from environment');
+      credentials.github = githubCredentials;
+    } else if (deploymentOptions.githubCredentials) {
+      logger.debug('[deployCode] Using GitHub credentials from request');
+      credentials.github = deploymentOptions.githubCredentials;
+    }
+    
+    // Determine if we should set up GitHub based on options or target
+    const setupGitHub = deploymentOptions.setupGitHub || 
+                        context.deploymentTarget === 'netlify-github';
+    
+    // Check if we have the required credentials for the target
+    if (context.deploymentTarget === 'netlify-github') {
+      if (!credentials.github || !credentials.github.token) {
+        logger.error('❌ [deployCode] GitHub credentials required for netlify-github deployment but not provided');
+        throw new Error('GitHub credentials are required for netlify-github deployment');
+      }
+      
+      if (!credentials.netlify || !credentials.netlify.apiToken) {
+        logger.error('❌ [deployCode] Netlify credentials required for netlify-github deployment but not provided');
+        throw new Error('Netlify credentials are required for netlify-github deployment');
+      }
+    } else if (context.deploymentTarget === 'netlify') {
+      if (!credentials.netlify || !credentials.netlify.apiToken) {
+        logger.error('❌ [deployCode] Netlify credentials required for netlify deployment but not provided');
+        throw new Error('Netlify credentials are required for netlify deployment');
+      }
+    } else if (context.deploymentTarget === 'cloudflare') {
+      if (!credentials.cloudflare || !credentials.cloudflare.apiToken) {
+        logger.error('❌ [deployCode] Cloudflare credentials required for cloudflare deployment but not provided');
+        throw new Error('Cloudflare credentials are required for cloudflare deployment');
       }
     }
     
-    // Fall back to DeploymentManager if direct Netlify deployment was not attempted or failed
-    if (!deployment) {
-      logger.info('[deployCode] Falling back to DeploymentManager deployment');
-      const projectName = context.projectId ? `project-${context.projectId.substring(0, 8)}` : 'unnamed-project';
-      logger.info(`[deployCode] Deploying project ${projectName} with ID ${context.projectId || 'no-id'} via Manager`);
-      try {
-        deployment = await deploymentManager.deploymentManager.deployWithBestTarget({
-          projectName: projectName,
-          files: files,
-          targetName: context.deploymentOptions?.targetName,
-          projectId: context.projectId
-        });
-        logger.info('[deployCode] Deployment via Manager completed', { deployment });
-      } catch (managerError) {
-         logger.error('[deployCode] Error during DeploymentManager deployment', managerError);
-         // If manager also fails, return context without deployment result
-         return context;
+    logger.info('✅ [deployCode] Using DeploymentWorkflowService to deploy project', {
+      projectId: context.projectId,
+      target: context.deploymentTarget,
+      setupGitHub,
+      hasNetlifyCreds: !!credentials.netlify?.apiToken,
+      hasGithubCreds: !!credentials.github?.token,
+      hasCfCreds: !!(credentials.cloudflare?.accountId && credentials.cloudflare?.apiToken)
+    });
+    
+    // Deploy the project using the workflow service
+    const deployment = await deploymentWorkflowService.deployProject({
+      projectId: context.projectId,
+      projectName: context.project?.name || 'Generated Project',
+      files: context.files,
+      targetName: context.deploymentTarget,
+      setupGitHub,
+      credentials,
+      metadata: {
+        ...deploymentOptions,
+        environment: context.env
       }
-    }
+    });
     
-    // Update context with deployment result if deployment was successful
-    if (deployment) {
-       logger.info('[deployCode] Updating context with deployment result', { deploymentId: deployment.id });
-       context.deploymentResult = {
-         id: deployment.id,
-         url: deployment.url,
-         status: deployment.status
-       };
-    } else {
-       logger.warn('[deployCode] Deployment object was unexpectedly null/undefined after attempting deployment');
-    }
+    // Update context with deployment result
+    logger.info('🎉 [deployCode] Deployment completed successfully', {
+      deploymentId: deployment.id,
+      url: deployment.url,
+      status: deployment.status,
+      provider: deployment.provider
+    });
     
-    logger.info('[deployCode] Exiting deployment step');
+    context.deploymentResult = {
+      id: deployment.id,
+      url: deployment.url,
+      status: deployment.status
+    };
+    
     return context;
   } catch (error) {
-    logger.error('[deployCode] Uncaught error during deployment process:', error);
-    // Still return the context even if deployment failed
+    logger.error('❌ [deployCode] Error during deployment process:', error);
+    
+    // Add error to context but don't throw it so the rest of the chain can continue
+    if (!context.error) {
+      context.error = error instanceof Error ? error : new Error(String(error));
+    }
+    
     return context;
   }
 }

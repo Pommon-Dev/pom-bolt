@@ -1,6 +1,7 @@
 import { getEnvironment, StorageType, EnvironmentType } from '~/lib/environments';
 import { createScopedLogger } from '~/utils/logger';
 import type { ProjectState, ProjectStorageAdapter } from '../types';
+import { getProjectKey } from '../key-utils';
 
 const logger = createScopedLogger('cloudflare-project-storage');
 
@@ -9,7 +10,6 @@ const logger = createScopedLogger('cloudflare-project-storage');
  * Falls back to memory storage if neither is available
  */
 export class CloudflareProjectStorage implements ProjectStorageAdapter {
-  private readonly storagePrefix = 'pom_bolt_project_';
   private readonly projectListKey = 'pom_bolt_project_list';
   private readonly environment;
   private readonly storageType: StorageType;
@@ -53,13 +53,6 @@ export class CloudflareProjectStorage implements ProjectStorageAdapter {
   }
   
   /**
-   * Get project storage key
-   */
-  private getProjectKey(id: string): string {
-    return `${this.storagePrefix}${id}`;
-  }
-  
-  /**
    * Save a project state
    */
   async saveProject(project: ProjectState): Promise<void> {
@@ -68,7 +61,7 @@ export class CloudflareProjectStorage implements ProjectStorageAdapter {
       await this.updateProjectList(project);
       
       // Then save the project data
-      const key = this.getProjectKey(project.id);
+      const key = getProjectKey(project.id);
       logger.debug(`[saveProject] Attempting to save project with key: ${key}`, { projectId: project.id });
       await this.environment.storeValue(this.storageType, key, project);
       
@@ -84,7 +77,7 @@ export class CloudflareProjectStorage implements ProjectStorageAdapter {
    */
   async getProject(id: string): Promise<ProjectState | null> {
     try {
-      const key = this.getProjectKey(id);
+      const key = getProjectKey(id);
       logger.debug(`[getProject] Attempting to retrieve project with key: ${key}`, { projectId: id });
       const project = await this.environment.retrieveValue<ProjectState>(this.storageType, key);
       
@@ -171,17 +164,26 @@ export class CloudflareProjectStorage implements ProjectStorageAdapter {
    */
   async deleteProject(id: string): Promise<boolean> {
     try {
+      logger.debug(`[deleteProject] Attempting to delete project ${id}`);
+      
+      // First check if the project exists
+      const exists = await this.projectExists(id);
+      if (!exists) {
+        logger.warn(`[deleteProject] Project ${id} does not exist`);
+        return false;
+      }
+      
       // Remove from project list
       await this.removeFromProjectList(id);
       
       // Delete the project data
-      const key = this.getProjectKey(id);
+      const key = getProjectKey(id);
       await this.environment.removeValue(this.storageType, key);
       
-      logger.debug(`Deleted project ${id} from Cloudflare storage`);
+      logger.info(`[deleteProject] Successfully deleted project ${id} from Cloudflare storage`);
       return true;
     } catch (error) {
-      logger.error(`Failed to delete project ${id}:`, error);
+      logger.error(`[deleteProject] Failed to delete project ${id}:`, error);
       return false;
     }
   }

@@ -52,6 +52,7 @@ export interface DeploymentResult {
   logs: string[];                       // Deployment logs
   provider: string;                     // The provider used (e.g., 'cloudflare', 'vercel')
   metadata?: Record<string, any>;       // Additional metadata about the deployment
+  error?: string;                       // Optional error message if the deployment failed
 }
 
 /**
