@@ -102,25 +102,52 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
    */
   async isAvailable(): Promise<boolean> {
     try {
+      logger.info('Checking if Netlify-GitHub target is available...');
+      
+      // Validate tokens first
+      if (!this.netlifyToken) {
+        logger.warn('Netlify token is missing for NetlifyGitHubTarget');
+        return false;
+      }
+      
+      if (!this.githubToken) {
+        logger.warn('GitHub token is missing for NetlifyGitHubTarget');
+        return false;
+      }
+      
       // First validate GitHub token using the GitHub integration service
+      logger.debug('Validating GitHub token for NetlifyGitHubTarget...');
       const tempRepo = new GitHubRepository({
         token: this.githubToken,
         owner: this.githubOwner
       });
       
-      const githubValid = await tempRepo.validateToken();
-      if (!githubValid) {
-        logger.warn('GitHub token is invalid or has insufficient permissions');
+      try {
+        const githubValid = await tempRepo.validateToken();
+        if (!githubValid) {
+          logger.warn('GitHub token is invalid or has insufficient permissions');
+          return false;
+        }
+        logger.debug('GitHub token validated successfully');
+      } catch (error) {
+        logger.error('Error validating GitHub token:', error);
         return false;
       }
 
       // Then validate Netlify token
-      const response = await fetch(`${NETLIFY_API_BASE}/sites`, {
-        headers: this.getNetlifyHeaders()
-      });
+      logger.debug('Validating Netlify token for NetlifyGitHubTarget...');
+      try {
+        const response = await fetch(`${NETLIFY_API_BASE}/sites`, {
+          headers: this.getNetlifyHeaders()
+        });
 
-      if (!response.ok) {
-        logger.warn(`Netlify token validation failed: ${response.statusText}`);
+        if (!response.ok) {
+          logger.warn(`Netlify token validation failed: ${response.statusText}`);
+          return false;
+        }
+        logger.debug('Netlify token validated successfully');
+      } catch (error) {
+        logger.error('Error validating Netlify token:', error);
         return false;
       }
 
@@ -358,36 +385,45 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
   /**
    * Create a new Netlify site
    */
-  private async createNetlifySite(name: string): Promise<{ id: string; url: string; name: string } | null> {
+  private async createSite(options: {
+    name: string;
+    githubRepo?: string;
+    githubBranch?: string;
+    buildSettings?: {
+      cmd?: string;
+      dir?: string;
+      env?: Record<string, string>;
+    };
+  }): Promise<any> {
     try {
+      logger.info(`Creating new Netlify site with name: ${options.name}`);
+      
+      const sanitizedName = options.name
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      
+      // Create the site without linking GitHub
       const response = await fetch(`${NETLIFY_API_BASE}/sites`, {
         method: 'POST',
         headers: this.getNetlifyHeaders(),
         body: JSON.stringify({
-          name: name.toLowerCase(),
-          build_settings: {
-            cmd: this.buildConfig.buildCommand,
-            dir: this.buildConfig.outputDir
-          }
+          name: sanitizedName
         })
       });
-
+      
       if (!response.ok) {
         const errorData = await response.json() as NetlifyErrorResponse;
-        logger.error(`Failed to create Netlify site ${name}:`, errorData);
+        logger.error(`Failed to create Netlify site: ${response.statusText}`, errorData);
         return null;
       }
-
-      const data = await response.json() as { id: string; name: string; ssl_url: string; url: string };
-      logger.info(`Created Netlify site: ${data.name} (${data.id})`);
       
-      return {
-        id: data.id,
-        name: data.name,
-        url: data.ssl_url || data.url
-      };
+      const siteData = await response.json() as { id: string; name: string; ssl_url: string; url: string };
+      logger.info(`Successfully created Netlify site: ${siteData.name} (${siteData.id})`);
+      return siteData;
     } catch (error) {
-      logger.error(`Error creating Netlify site ${name}:`, error);
+      logger.error('Error creating Netlify site:', error);
       return null;
     }
   }
@@ -397,30 +433,151 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
    */
   private async linkGitHubRepo(
     siteId: string, 
-    repoData: { fullName: string; defaultBranch?: string }
+    repoData: { fullName: string; defaultBranch?: string },
+    buildSettings?: { cmd?: string; dir?: string; env?: Record<string, string> }
   ): Promise<boolean> {
     try {
-      const response = await fetch(`${NETLIFY_API_BASE}/sites/${siteId}/builds`, {
-        method: 'POST',
+      logger.info(`Attempting to link GitHub repo ${repoData.fullName} to Netlify site ${siteId}`);
+      
+      // Include build settings in the request payload
+      const requestBody: any = {
+        build_settings: {
+          provider: 'github',
+          repo_url: `https://github.com/${repoData.fullName}`,
+          repo_branch: repoData.defaultBranch || 'main'
+        }
+      };
+      
+      // Add build command and publish directory if provided
+      if (buildSettings) {
+        logger.info(`Including build settings in GitHub linking request:`, {
+          cmd: buildSettings.cmd,
+          dir: buildSettings.dir
+        });
+        
+        if (buildSettings.cmd) {
+          requestBody.build_settings.cmd = buildSettings.cmd;
+        }
+        
+        if (buildSettings.dir) {
+          requestBody.build_settings.dir = buildSettings.dir;
+        }
+        
+        // Add environment variables if provided
+        if (buildSettings.env && Object.keys(buildSettings.env).length > 0) {
+          requestBody.build_settings.env = buildSettings.env;
+        }
+      }
+      
+      // Log the full request for debugging
+      logger.debug(`Netlify API request payload:`, JSON.stringify(requestBody, null, 2));
+      
+      // Try the direct build settings approach first
+      const response = await fetch(`${NETLIFY_API_BASE}/sites/${siteId}`, {
+        method: 'PATCH',
         headers: this.getNetlifyHeaders(),
-        body: JSON.stringify({
-          repo: {
-            provider: 'github',
-            repo: repoData.fullName,
-            private: true,
-            branch: repoData.defaultBranch || 'main'
-          }
-        })
+        body: JSON.stringify(requestBody)
       });
 
       if (!response.ok) {
-        const errorData = await response.json() as NetlifyErrorResponse;
-        logger.error(`Failed to link GitHub repo to Netlify site ${siteId}:`, errorData);
-        return false;
+        let errorData: NetlifyErrorResponse | string = '';
+        try {
+          errorData = await response.json() as NetlifyErrorResponse;
+        } catch (jsonError) {
+          // Handle case where response is not JSON
+          const textResponse = await response.text();
+          logger.error(`Non-JSON error response from Netlify API: ${textResponse}`);
+          errorData = textResponse;
+        }
+        
+        logger.error(`Failed to link GitHub repo to Netlify site ${siteId} using direct method:`, errorData);
+        
+        // Try alternative approach with service instances
+        logger.info(`Trying alternative method to link GitHub repo ${repoData.fullName}`);
+        const altResponse = await fetch(`${NETLIFY_API_BASE}/sites/${siteId}/service-instances`, {
+          method: 'POST',
+          headers: this.getNetlifyHeaders(),
+          body: JSON.stringify({
+            service: 'github',
+            repo: repoData.fullName,
+            branch: repoData.defaultBranch || 'main'
+          })
+        });
+        
+        if (!altResponse.ok) {
+          let altErrorData: NetlifyErrorResponse | string = '';
+          try {
+            altErrorData = await altResponse.json() as NetlifyErrorResponse;
+          } catch (jsonError) {
+            // Handle case where response is not JSON
+            const textResponse = await altResponse.text();
+            logger.error(`Non-JSON error response from Netlify API: ${textResponse}`);
+            altErrorData = textResponse;
+          }
+          
+          logger.error(`Alternative method also failed:`, altErrorData);
+          return false;
+        }
+        
+        logger.info(`Successfully linked GitHub repo ${repoData.fullName} to Netlify site ${siteId} using alternative method`);
+        
+        // Since we used the alternative method, we need to update build settings separately
+        if (buildSettings) {
+          logger.info(`Setting build configuration after GitHub linking...`);
+          const configResponse = await fetch(`${NETLIFY_API_BASE}/sites/${siteId}`, {
+            method: 'PATCH',
+            headers: this.getNetlifyHeaders(),
+            body: JSON.stringify({
+              build_settings: {
+                cmd: buildSettings.cmd,
+                dir: buildSettings.dir,
+                env: buildSettings.env
+              }
+            })
+          });
+          
+          if (!configResponse.ok) {
+            try {
+              const configErrorData = await configResponse.json();
+              logger.warn(`Failed to update build settings after GitHub linking:`, configErrorData);
+            } catch (jsonError) {
+              const textResponse = await configResponse.text();
+              logger.warn(`Failed to update build settings, non-JSON response: ${textResponse}`);
+            }
+          } else {
+            logger.info(`Successfully updated build settings for Netlify site ${siteId}`);
+          }
+        }
+        
+        // Verify the linking
+        const linkingVerification = await this.verifyGitHubLinking(siteId);
+        if (linkingVerification.isLinked) {
+          logger.info(`Verified GitHub repository linking with build settings:`, {
+            repoUrl: linkingVerification.repoUrl,
+            buildCommand: linkingVerification.buildCommand,
+            publishDir: linkingVerification.publishDir
+          });
+        } else {
+          logger.warn(`GitHub repository appears to be linked but verification failed`);
+        }
+        
+        return true;
       }
 
-      const data = await response.json();
-      logger.info(`Linked GitHub repo ${repoData.fullName} to Netlify site ${siteId}`);
+      logger.info(`Successfully linked GitHub repo ${repoData.fullName} to Netlify site ${siteId}`);
+      
+      // Verify the linking
+      const linkingVerification = await this.verifyGitHubLinking(siteId);
+      if (linkingVerification.isLinked) {
+        logger.info(`Verified GitHub repository linking with build settings:`, {
+          repoUrl: linkingVerification.repoUrl,
+          buildCommand: linkingVerification.buildCommand,
+          publishDir: linkingVerification.publishDir
+        });
+      } else {
+        logger.warn(`GitHub repository appears to be linked but verification failed`);
+      }
+      
       return true;
     } catch (error) {
       logger.error(`Error linking GitHub repo to Netlify site ${siteId}:`, error);
@@ -492,7 +649,11 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
 
       // Create a Netlify site
       const netlifyName = this.buildConfig.siteName || sanitizedName;
-      const netlifyData = await this.createNetlifySite(netlifyName);
+      const netlifyData = await this.createSite({
+        name: netlifyName,
+        githubRepo: githubResult.repositoryInfo.fullName,
+        githubBranch: githubResult.repositoryInfo.defaultBranch
+      });
       if (!netlifyData) {
         throw this.createError(
           DeploymentErrorType.INITIALIZATION_FAILED,
@@ -502,10 +663,20 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
       logger.info(`Netlify site created: ${netlifyData.name} (${netlifyData.id})`);
 
       // Link the GitHub repo to the Netlify site
+      logger.info(`Step 3: Linking GitHub repository to Netlify site`);
+      
+      // Detect build settings from the files
+      const buildSettings = this.detectBuildSettings(options.files || {});
+      logger.info(`Detected build settings for ${sanitizedName}:`, {
+        buildCommand: buildSettings.cmd,
+        publishDir: buildSettings.dir,
+        envVars: Object.keys(buildSettings.env)
+      });
+      
       const linkSuccess = await this.linkGitHubRepo(netlifyData.id, {
         fullName: githubResult.repositoryInfo.fullName,
         defaultBranch: githubResult.repositoryInfo.defaultBranch
-      });
+      }, buildSettings);
       
       if (!linkSuccess) {
         throw this.createError(
@@ -529,7 +700,7 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
         id: netlifyData.id,
         name: netlifyData.name,
         provider: this.getProviderType(),
-        url: netlifyData.url,
+        url: netlifyData.ssl_url || netlifyData.url,
         metadata: updatedMetadata
       };
     } catch (error) {
@@ -567,7 +738,10 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
    */
   async deploy(options: DeployOptions): Promise<DeploymentResult> {
     try {
-      logger.info(`Starting Netlify-GitHub deployment: ${options.projectName || options.projectId}`);
+      logger.info(`Starting Netlify-GitHub deployment with sequential flow: ${options.projectName || options.projectId}`, {
+        projectId: options.projectId,
+        hasMetadata: !!options.metadata
+      });
       
       if (!options.projectId) {
         throw this.createError(
@@ -576,133 +750,42 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
         );
       }
       
-      if (!options.files || Object.keys(options.files).length === 0) {
-        throw this.createError(
-          DeploymentErrorType.UNKNOWN,
-          'No files provided for deployment'
-        );
-      }
+      // 1. Set up or update GitHub repository
+      let githubInfo: GitHubRepositoryInfo | undefined;
+      const projectName = this.getValidProjectName(options.projectId);
+      const filteredFiles = this.filterFiles(options.files || {});
       
-      const projectId = options.projectId;
+      logger.info(`Step 1: Setting up GitHub repository for ${projectName}`);
+      // Check if we already have GitHub info in the metadata
+      const trackingData = githubIntegration.extractGitHubMetadata(options.metadata);
+      githubInfo = trackingData.github;
       
-      // Set up GitHubIntegrationService
-      const githubService = GitHubIntegrationService.getInstance();
-      const projectName = this.getValidProjectName(projectId);
-      const filteredFiles = this.filterFiles(options.files);
-      
-      // Check if we have a site ID in metadata
-      const siteId = options.metadata?.netlify?.siteId || projectId;
-      
-      // If we have a site ID, check if it exists and is linked to GitHub
-      let site: any = null;
-      if (siteId) {
-        site = await this.getSite(siteId);
-      }
-      
-      // First, check if we already have GitHub info in the metadata
-      const githubInfo = githubIntegration.extractGitHubMetadata(options.metadata).github;
-      
-      if (githubInfo) {
-        logger.info(`Using existing GitHub repository: ${githubInfo.fullName}`);
-        
-        // Check if the files need to be updated
+      if (githubInfo && trackingData.repoCreated) {
+        // Update existing GitHub repository if we have files
+        logger.info(`Updating existing GitHub repository: ${githubInfo.fullName}`);
         if (Object.keys(filteredFiles).length > 0) {
-          logger.info(`Updating GitHub repository ${githubInfo.fullName} with ${Object.keys(filteredFiles).length} files`);
-          
-          try {
-            // Update the files in the GitHub repository
-            const updateResult = await githubIntegration.uploadFiles({
-              token: this.githubToken,
-              projectId,
-              repositoryInfo: githubInfo,
-              files: filteredFiles,
-              metadata: options.metadata
-            });
-            
-            if (!updateResult.success) {
-              logger.error(`Failed to update GitHub repository: ${updateResult.error || 'Unknown error'}`);
-            } else {
-              logger.info(`Successfully updated GitHub repository ${githubInfo.fullName}`);
-            }
-          } catch (error) {
-            logger.error(`Error updating GitHub repository: ${error instanceof Error ? error.message : 'Unknown error'}`);
-          }
-        }
-        
-        // Check if the Netlify site already exists
-        logger.info(`Checking if Netlify site ${siteId} exists...`);
-        
-        if (site) {
-          logger.info(`Found existing Netlify site: ${site.name} (${siteId})`);
-          
-          // Check if already linked to GitHub
-          if (site.build_settings?.repo_url) {
-            logger.info(`Netlify site is already linked to GitHub repository: ${site.build_settings.repo_url}`);
-          } else {
-            // Link the GitHub repo to the Netlify site
-            logger.info(`Linking GitHub repository ${githubInfo.fullName} to Netlify site ${siteId}`);
-            
-            const linkSuccess = await this.linkGitHubRepo(siteId, {
-              fullName: githubInfo.fullName,
-              defaultBranch: githubInfo.defaultBranch || 'main'
-            });
-            
-            if (linkSuccess) {
-              logger.info(`Successfully linked GitHub repo ${githubInfo.fullName} to Netlify site ${siteId}`);
-            } else {
-              logger.error(`Failed to link GitHub repo ${githubInfo.fullName} to Netlify site ${siteId}`);
-            }
-          }
-          
-          // Return a successful deployment result
-          return {
-            id: `github-${Date.now()}`,
-            url: site.ssl_url || site.url,
-            status: 'in-progress',
-            provider: this.getProviderType(),
-            logs: [`GitHub repository updated. Netlify will automatically rebuild.`]
-          };
-        } else {
-          // Need to create a new Netlify site linked to the existing GitHub repo
-          logger.info(`Creating new Netlify site linked to GitHub repository ${githubInfo.fullName}`);
-          
-          const newSite = await this.createSite({
-            name: projectName,
-            githubRepo: githubInfo.fullName,
-            githubBranch: githubInfo.defaultBranch || 'main',
-            buildSettings: this.detectBuildSettings(filteredFiles)
+          const updateResult = await githubIntegration.uploadFiles({
+            token: this.githubToken,
+            projectId: options.projectId,
+            repositoryInfo: githubInfo,
+            files: filteredFiles,
+            metadata: options.metadata
           });
           
-          if (!newSite) {
-            throw this.createError(
-              DeploymentErrorType.DEPLOYMENT_FAILED,
-              `Failed to create Netlify site`
-            );
+          if (!updateResult.success) {
+            logger.error(`Failed to update GitHub repository: ${updateResult.error || 'Unknown error'}`);
           }
-          
-          logger.info(`Netlify site created: ${newSite.name} (${newSite.id})`);
-          
-          // Return deployment result
-          return {
-            id: `github-${Date.now()}`,
-            url: newSite.ssl_url || newSite.url,
-            status: 'in-progress',
-            provider: this.getProviderType(),
-            logs: [`Netlify site created and connected to GitHub repository. Waiting for build to complete.`]
-          };
         }
       } else {
-        // No GitHub info in metadata, need to create GitHub repo first
-        logger.info(`No GitHub repository info found. Creating a new GitHub repository for project ${siteId}`);
-        
-        // Use the github integration service to setup a new repository
+        // Create new GitHub repository
+        logger.info(`Creating new GitHub repository for ${projectName}`);
         const githubResult = await githubIntegration.setupRepository({
           token: this.githubToken,
           owner: this.githubOwner,
-          projectId,
+          projectId: options.projectId,
           projectName,
           files: filteredFiles,
-          description: `Generated application for ${projectName}`,
+          description: `Generated application for ${options.projectName || projectName}`,
           metadata: options.metadata
         });
         
@@ -713,68 +796,67 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
           );
         }
         
-        const newGithubInfo = githubResult.repositoryInfo;
-        logger.info(`GitHub repository created: ${newGithubInfo.fullName}`);
-        
-        // Check if Netlify site exists
-        const siteData = await this.getSite(siteId);
-        
-        if (siteData) {
-          // Link the GitHub repo to the existing Netlify site
-          logger.info(`Linking GitHub repository ${newGithubInfo.fullName} to existing Netlify site ${siteId}`);
-          
-          const linkSuccess = await this.linkGitHubRepo(siteId, {
-            fullName: newGithubInfo.fullName,
-            defaultBranch: newGithubInfo.defaultBranch
-          });
-          
-          if (!linkSuccess) {
-            throw this.createError(
-              DeploymentErrorType.DEPLOYMENT_FAILED,
-              `Failed to link GitHub repo ${newGithubInfo.fullName} to Netlify site ${siteId}`
-            );
-          }
-          
-          logger.info(`Successfully linked GitHub repo ${newGithubInfo.fullName} to Netlify site ${siteId}`);
-          
-          // Return a successful deployment result
-          return {
-            id: `github-${Date.now()}`,
-            url: siteData.ssl_url || siteData.url,
-            status: 'in-progress',
-            provider: this.getProviderType(),
-            logs: [`GitHub repository created and linked to Netlify site. Waiting for build to complete.`]
-          };
-        } else {
-          // Create a new Netlify site
-          logger.info(`Creating new Netlify site linked to GitHub repository ${newGithubInfo.fullName}`);
-          
-          const newSite = await this.createSite({
-            name: projectName,
-            githubRepo: newGithubInfo.fullName,
-            githubBranch: newGithubInfo.defaultBranch,
-            buildSettings: this.detectBuildSettings(filteredFiles)
-          });
-          
-          if (!newSite) {
-            throw this.createError(
-              DeploymentErrorType.DEPLOYMENT_FAILED,
-              `Failed to create Netlify site`
-            );
-          }
-          
-          logger.info(`Netlify site created: ${newSite.name} (${newSite.id})`);
-          
-          // Return deployment result
-          return {
-            id: `github-${Date.now()}`,
-            url: newSite.ssl_url || newSite.url,
-            status: 'in-progress',
-            provider: this.getProviderType(),
-            logs: [`Netlify site created and connected to GitHub repository. Waiting for build to complete.`]
-          };
-        }
+        githubInfo = githubResult.repositoryInfo;
+        logger.info(`Created GitHub repository: ${githubInfo.fullName}`);
       }
+      
+      // 2. Create Netlify site
+      logger.info(`Step 2: Creating Netlify site for ${projectName}`);
+      const netlifyData = await this.createSite({
+        name: projectName,
+        buildSettings: this.detectBuildSettings(filteredFiles)
+      });
+      
+      if (!netlifyData) {
+        throw this.createError(
+          DeploymentErrorType.DEPLOYMENT_FAILED,
+          `Failed to create Netlify site for ${projectName}`
+        );
+      }
+      
+      logger.info(`Created Netlify site: ${netlifyData.name} (${netlifyData.id})`);
+      
+      // 3. Link GitHub repository to Netlify site
+      logger.info(`Step 3: Linking GitHub repository to Netlify site`);
+      
+      // Detect build settings from the files
+      const buildSettings = this.detectBuildSettings(filteredFiles);
+      logger.info(`Detected build settings for ${projectName}:`, {
+        buildCommand: buildSettings.cmd,
+        publishDir: buildSettings.dir,
+        envVars: Object.keys(buildSettings.env)
+      });
+      
+      const linkSuccess = await this.linkGitHubRepo(netlifyData.id, {
+        fullName: githubInfo.fullName,
+        defaultBranch: githubInfo.defaultBranch || 'main'
+      }, buildSettings);
+      
+      if (!linkSuccess) {
+        throw this.createError(
+          DeploymentErrorType.DEPLOYMENT_FAILED,
+          `Failed to link GitHub repo ${githubInfo.fullName} to Netlify site ${netlifyData.id}`
+        );
+      }
+      
+      logger.info(`Successfully linked GitHub repo ${githubInfo.fullName} to Netlify site ${netlifyData.id}`);
+      
+      // 4. Return deployment result
+      return {
+        id: `github-${Date.now()}`,
+        url: netlifyData.ssl_url || netlifyData.url,
+        status: 'in-progress',
+        provider: this.getProviderType(),
+        logs: [`GitHub repository linked to Netlify site. Waiting for build to complete.`],
+        metadata: {
+          netlify: {
+            siteId: netlifyData.id,
+            siteName: netlifyData.name,
+            siteUrl: netlifyData.ssl_url || netlifyData.url
+          },
+          github: githubInfo
+        }
+      };
     } catch (error) {
       logger.error(`Netlify GitHub deployment failed:`, error);
       throw this.createError(
@@ -919,6 +1001,7 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
         id: string; 
         name: string; 
         ssl_url: string;
+        url: string;
         build_settings?: {
           repo_url?: string;
           repo_branch?: string;
@@ -930,56 +1013,6 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
     }
   }
 
-  /**
-   * Create a new Netlify site linked to a GitHub repository
-   */
-  private async createSite(options: {
-    name: string;
-    githubRepo: string;
-    githubBranch: string;
-    buildSettings?: {
-      cmd?: string;
-      dir?: string;
-      env?: Record<string, string>;
-    };
-  }): Promise<any> {
-    try {
-      logger.info(`Creating new Netlify site for ${options.name} linked to GitHub repo ${options.githubRepo}`);
-      
-      const sanitizedName = options.name
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
-      
-      // Create the site
-      const response = await fetch(`${NETLIFY_API_BASE}/sites`, {
-        method: 'POST',
-        headers: this.getNetlifyHeaders(),
-        body: JSON.stringify({
-          name: sanitizedName,
-          build_settings: {
-            repo_url: `https://github.com/${options.githubRepo}`,
-            repo_branch: options.githubBranch,
-            cmd: options.buildSettings?.cmd || 'npm run build',
-            dir: options.buildSettings?.dir || 'build',
-            env: options.buildSettings?.env || {}
-          }
-        })
-      });
-      
-      if (!response.ok) {
-        logger.error(`Failed to create Netlify site: ${response.statusText}`);
-        return null;
-      }
-      
-      return await response.json();
-    } catch (error) {
-      logger.error('Error creating Netlify site:', error);
-      return null;
-    }
-  }
-  
   /**
    * Detect build settings based on the files in the repository
    */
@@ -1034,5 +1067,62 @@ export class NetlifyGitHubTarget extends BaseDeploymentTarget {
     }
     
     return settings;
+  }
+
+  /**
+   * Log debug information about the target configuration
+   */
+  logDebugInfo(): void {
+    logger.info('NetlifyGitHubTarget configuration:', {
+      hasNetlifyToken: !!this.netlifyToken,
+      netlifyTokenLength: this.netlifyToken ? this.netlifyToken.length : 0,
+      hasGithubToken: !!this.githubToken,
+      githubTokenLength: this.githubToken ? this.githubToken.length : 0,
+      hasGithubOwner: !!this.githubOwner
+    });
+  }
+
+  /**
+   * Verify if a Netlify site is properly linked to GitHub and has correct build settings
+   */
+  private async verifyGitHubLinking(siteId: string): Promise<{ 
+    isLinked: boolean; 
+    repoUrl?: string; 
+    buildCommand?: string; 
+    publishDir?: string; 
+  }> {
+    try {
+      logger.info(`Verifying GitHub linking for Netlify site ${siteId}...`);
+      
+      // Get site details including build settings
+      const siteData = await this.getSite(siteId);
+      if (!siteData) {
+        logger.warn(`Cannot verify GitHub linking - site ${siteId} not found`);
+        return { isLinked: false };
+      }
+      
+      // Log the complete site data for debugging
+      logger.debug(`Netlify site data:`, JSON.stringify(siteData, null, 2));
+      
+      // Check if the site has build settings with GitHub provider
+      const buildSettings = siteData.build_settings || {};
+      const isLinked = buildSettings.provider === 'github' && !!buildSettings.repo_url;
+      
+      if (isLinked) {
+        logger.info(`Netlify site ${siteId} is linked to GitHub repository: ${buildSettings.repo_url}`);
+        return {
+          isLinked: true,
+          repoUrl: buildSettings.repo_url,
+          buildCommand: buildSettings.cmd || 'No build command specified',
+          publishDir: buildSettings.dir || 'No publish directory specified'
+        };
+      } else {
+        logger.warn(`Netlify site ${siteId} is not linked to any GitHub repository`);
+        return { isLinked: false };
+      }
+    } catch (error) {
+      logger.error(`Error verifying GitHub linking for Netlify site ${siteId}:`, error);
+      return { isLinked: false };
+    }
   }
 }

@@ -15,6 +15,7 @@ import { loader as betaAuthLoader } from './middleware/beta-auth.server';
 import { environment, getEnvironmentInfo, initEnvironmentWithContext } from './lib/environment-setup';
 import type { EnvironmentInfo } from './lib/environments';
 import { EnvironmentIndicator } from './components/system/EnvironmentIndicator';
+import { BackgroundSync } from './components/BackgroundSync';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
 import globalStyles from './styles/index.scss?url';
@@ -80,6 +81,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   return (
     <DndProvider backend={HTML5Backend}>
+      <BackgroundSync />
       {children}
       <EnvironmentIndicator />
       <ScrollRestoration />

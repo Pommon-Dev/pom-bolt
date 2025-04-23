@@ -14,6 +14,7 @@ import type {
 import { DeploymentErrorType } from './types';
 import { LocalZipTarget } from './targets/local-zip';
 import { getCloudflareCredentials, getNetlifyCredentials, getGitHubCredentials } from './credentials';
+import { getProjectStorageService } from '~/lib/projects/storage-service';
 
 const logger = createScopedLogger('deployment-manager');
 
@@ -37,12 +38,13 @@ export interface DeploymentManagerOptions {
 export class DeploymentManager {
   private targets: Map<string, DeploymentTarget> = new Map();
   private preferredTargets: string[] = [];
+  private storageService = getProjectStorageService();
   
   // Make constructor private to force initialization via static create method
   private constructor(options?: DeploymentManagerOptions) {
     this.preferredTargets = options?.preferredTargets || [
-      'netlify-github', // Add netlify-github as the highest priority
-      'netlify', // Keep netlify for backward compatibility
+      'netlify-github', // Keep netlify-github as highest priority
+      'netlify',
       'cloudflare-pages',
       'vercel',
       'github-pages',
@@ -52,6 +54,9 @@ export class DeploymentManager {
     
     // Basic sync initialization can remain here if needed, like setting preferredTargets
     this.initializeBasicTargets(); // Initialize fallback target synchronously
+    
+    // Debug log the preferred targets
+    logger.info(`DeploymentManager initialized with preferred targets: ${this.preferredTargets.join(', ')}`);
   }
 
   // Static factory method to create and initialize a deployment manager singleton
@@ -88,19 +93,28 @@ export class DeploymentManager {
         logger.debug('Attempting to retrieve Netlify credentials from environment/context');
       }
 
-      logger.debug(`Netlify token check: Present=${!!netlifyToken}, Source=${credsSource}`);
+      logger.debug(`Netlify token check: Present=${!!netlifyToken}, Source=${credsSource}, Length=${netlifyToken ? netlifyToken.length : 0}`);
 
       if (netlifyToken) {
         logger.info('Attempting to register Netlify deployment target (Token found)');
         const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken });
         logger.debug('NetlifyTarget instantiated. Calling isAvailable()...');
-        const isAvailable = await netlifyTarget.isAvailable();
-        logger.debug(`NetlifyTarget.isAvailable() returned: ${isAvailable}`);
-        if (isAvailable) {
-          this.registerTarget('netlify', netlifyTarget);
-          logger.info('Successfully registered Netlify deployment target');
-        } else {
-          logger.warn('Netlify deployment target token found but API validation (isAvailable) failed');
+        try {
+          const isAvailable = await netlifyTarget.isAvailable();
+          logger.debug(`NetlifyTarget.isAvailable() returned: ${isAvailable}`);
+          if (isAvailable) {
+            this.registerTarget('netlify', netlifyTarget);
+            logger.info('Successfully registered Netlify deployment target');
+          } else {
+            logger.warn('Netlify deployment target token found but API validation (isAvailable) failed');
+            logger.debug('Netlify token details for debugging:', {
+              tokenLength: netlifyToken.length,
+              tokenPrefix: netlifyToken.substring(0, 4),
+              tokenSuffix: netlifyToken.substring(netlifyToken.length - 4)
+            });
+          }
+        } catch (error) {
+          logger.error('Error checking if Netlify target is available:', error);
         }
       } else {
         logger.warn('Netlify deployment target not registered - missing API token');
@@ -124,7 +138,7 @@ export class DeploymentManager {
         githubToken = githubCreds.token;
       }
 
-      logger.debug(`NetlifyGitHub tokens check: Netlify=${!!netlifyToken}, GitHub=${!!githubToken}`);
+      logger.debug(`NetlifyGitHub tokens check: Netlify=${!!netlifyToken} (${netlifyToken ? netlifyToken.length : 0}), GitHub=${!!githubToken} (${githubToken ? githubToken.length : 0})`);
 
       if (netlifyToken && githubToken) {
         logger.info('Attempting to register NetlifyGitHub deployment target (Both tokens found)');
@@ -136,15 +150,28 @@ export class DeploymentManager {
           githubOwner: githubCreds.owner 
         });
         
-        logger.debug('NetlifyGitHubTarget instantiated. Calling isAvailable()...');
-        const isAvailable = await netlifyGithubTarget.isAvailable();
-        logger.debug(`NetlifyGitHubTarget.isAvailable() returned: ${isAvailable}`);
+        logger.debug('NetlifyGitHubTarget instantiated with configuration:');
+        netlifyGithubTarget.logDebugInfo();
         
-        if (isAvailable) {
-          this.registerTarget('netlify-github', netlifyGithubTarget);
-          logger.info('Successfully registered NetlifyGitHub deployment target');
-        } else {
-          logger.warn('NetlifyGitHub deployment target tokens found but API validation failed');
+        logger.debug('NetlifyGitHubTarget instantiated. Calling isAvailable()...');
+        try {
+          const isAvailable = await netlifyGithubTarget.isAvailable();
+          logger.debug(`NetlifyGitHubTarget.isAvailable() returned: ${isAvailable}`);
+          
+          if (isAvailable) {
+            this.registerTarget('netlify-github', netlifyGithubTarget);
+            logger.info('Successfully registered NetlifyGitHub deployment target');
+          } else {
+            logger.warn('NetlifyGitHub deployment target tokens found but API validation failed');
+            logger.debug('Token details for debugging:', {
+              netlifyLength: netlifyToken.length,
+              netlifyPrefix: netlifyToken.substring(0, 4),
+              githubLength: githubToken.length,
+              githubPrefix: githubToken.substring(0, 4)
+            });
+          }
+        } catch (error) {
+          logger.error('Error checking if NetlifyGitHub target is available:', error);
         }
       } else {
         logger.warn('NetlifyGitHub deployment target not registered - missing tokens');
@@ -158,16 +185,21 @@ export class DeploymentManager {
       let cfConfig = options?.cloudflareConfig;
       const credsSource = options?.cloudflareConfig ? 'options' : 'environment';
       
-      if (!cfConfig || !cfConfig.accountId || !cfConfig.apiToken) {
-        cfConfig = getCloudflareCredentials();
-        logger.debug('Attempting to retrieve Cloudflare credentials from environment');
-      }
+      // Get credentials from environment if not provided in options
+      const envCredentials = getCloudflareCredentials();
       
-      logger.debug(`Cloudflare credentials check: AccountID=${!!cfConfig.accountId}, API Token=${!!cfConfig.apiToken}, Source=${credsSource}`);
+      // Combine credentials, prioritizing options over environment
+      const cloudflareConfig: CloudflareConfig = {
+        accountId: cfConfig?.accountId || envCredentials.accountId || '',
+        apiToken: cfConfig?.apiToken || envCredentials.apiToken || '',
+        projectName: cfConfig?.projectName || envCredentials.projectName
+      };
       
-      if (cfConfig.accountId && cfConfig.apiToken) {
+      logger.debug(`Cloudflare credentials check: AccountID=${!!cloudflareConfig.accountId}, API Token=${!!cloudflareConfig.apiToken}, Source=${credsSource}`);
+      
+      if (cloudflareConfig.accountId && cloudflareConfig.apiToken) {
         logger.info('Attempting to register Cloudflare Pages deployment target');
-        const cloudflareTarget = new CloudflarePagesTarget(cfConfig);
+        const cloudflareTarget = new CloudflarePagesTarget(cloudflareConfig);
         logger.debug('CloudflarePagesTarget instantiated. Calling isAvailable()...');
         const isAvailable = await cloudflareTarget.isAvailable();
         logger.debug(`CloudflarePagesTarget.isAvailable() returned: ${isAvailable}`);
@@ -267,32 +299,69 @@ export class DeploymentManager {
   }
   
   /**
-   * Deploy a project using a specific deployment target
+   * Deploy a project
+   * Deploy files to a provider service
    */
-  async deployProject(
-    targetName: string,
-    options: DeployOptions
-  ): Promise<DeploymentResult> {
-    const target = this.targets.get(targetName);
+  async deployProject(options: {
+    targetName?: string;
+    projectId: string;
+    projectName?: string;
+    files: Record<string, string>;
+    metadata?: Record<string, any>;
+  }): Promise<DeploymentResult> {
+    logger.info(`Deploying project ${options.projectName || options.projectId} with target ${options.targetName || 'auto'}`);
     
-    if (!target) {
-      throw this.createError(
-        DeploymentErrorType.NOT_AVAILABLE,
-        `Deployment target "${targetName}" not found`
-      );
+    // If a specific target is requested, first check if it's available
+    if (options.targetName && options.targetName !== 'auto') {
+      logger.info(`Explicit target requested: ${options.targetName}`);
+      const requestedTarget = this.targets.get(options.targetName);
+      
+      if (requestedTarget) {
+        try {
+          const isAvailable = await requestedTarget.isAvailable();
+          if (isAvailable) {
+            logger.info(`Using explicitly requested target: ${options.targetName}`);
+            
+            // Initialize project if needed
+            const project = await this.initializeProject(requestedTarget, options);
+            
+            // Deploy
+            return await requestedTarget.deploy({
+              projectId: project.id,
+              projectName: project.name,
+              files: options.files,
+              metadata: {
+                ...options.metadata,
+                ...project.metadata
+              }
+            });
+          } else {
+            logger.warn(`Requested target ${options.targetName} is not available`);
+          }
+        } catch (error) {
+          logger.error(`Error with requested target ${options.targetName}:`, error);
+        }
+      } else {
+        logger.warn(`Requested target ${options.targetName} is not registered`);
+      }
     }
     
-    // Check if the target is available
-    if (!await target.isAvailable()) {
-      throw this.createError(
-        DeploymentErrorType.NOT_AVAILABLE,
-        `Deployment target "${targetName}" is not available`
-      );
+    // Use auto-select logic if the specific target fails or 'auto' is specified
+    const targetName = await this.selectBestTarget(options.targetName);
+    logger.info(`Selected deployment target: ${targetName}`);
+    
+    const target = this.targets.get(targetName);
+    if (!target) {
+      throw new Error(`Deployment target ${targetName} not available`);
     }
     
     // Deploy the project
-    logger.info(`Deploying project ${options.projectName} with target ${targetName}`);
-    return target.deploy(options);
+    return target.deploy({
+      projectId: options.projectId,
+      projectName: options.projectName || options.projectId,
+      files: options.files,
+      metadata: options.metadata
+    });
   }
   
   /**
@@ -313,7 +382,7 @@ export class DeploymentManager {
     
     // If a projectId is provided, deploy directly
     if (options.projectId) {
-      return this.deployProject(targetName, {
+      return this.deployProject({
         projectId: options.projectId,
         projectName: options.projectName,
         files: options.files,
@@ -368,30 +437,105 @@ export class DeploymentManager {
     
     return error;
   }
+
+  /**
+   * Get a specific deployment target by name
+   */
+  public getTarget(targetName: string): DeploymentTarget | null {
+    return this.targets.get(targetName) || null;
+  }
+
+  private async initializeTargets(options: DeploymentManagerOptions): Promise<void> {
+    try {
+      // Initialize Cloudflare Pages target if credentials are available
+      const cfConfig = options?.cloudflareConfig;
+      const credsSource = options?.cloudflareConfig ? 'options' : 'environment';
+      
+      // Get credentials from environment if not provided in options
+      const envCredentials = getCloudflareCredentials();
+      
+      // Combine credentials, prioritizing options over environment
+      const cloudflareConfig: CloudflareConfig = {
+        accountId: cfConfig?.accountId || envCredentials.accountId || '',
+        apiToken: cfConfig?.apiToken || envCredentials.apiToken || '',
+        projectName: cfConfig?.projectName || envCredentials.projectName
+      };
+      
+      logger.debug(`Cloudflare credentials check: AccountID=${!!cloudflareConfig.accountId}, API Token=${!!cloudflareConfig.apiToken}, Source=${credsSource}`);
+      
+      if (cloudflareConfig.accountId && cloudflareConfig.apiToken) {
+        logger.info('Attempting to register Cloudflare Pages deployment target');
+        const cloudflareTarget = new CloudflarePagesTarget(cloudflareConfig);
+        logger.debug('CloudflarePagesTarget instantiated. Calling isAvailable()...');
+        const isAvailable = await cloudflareTarget.isAvailable();
+        logger.debug(`CloudflarePagesTarget.isAvailable() returned: ${isAvailable}`);
+        if (isAvailable) {
+          this.registerTarget('cloudflare-pages', cloudflareTarget);
+          logger.info('Successfully registered Cloudflare Pages deployment target');
+        } else {
+          logger.warn('Cloudflare Pages deployment target not available despite credentials');
+        }
+      } else {
+        logger.warn('Cloudflare Pages deployment target not registered - missing credentials');
+      }
+    } catch (error) {
+      logger.error('Failed to register Cloudflare Pages deployment target:', error);
+    }
+
+    // Initialize Netlify target if token is available
+    if (options.netlifyToken) {
+      const netlifyTarget = new NetlifyTarget({
+        apiToken: options.netlifyToken
+      });
+      this.targets.set('netlify', netlifyTarget);
+    }
+
+    // Initialize Netlify GitHub target if both tokens are available
+    if (options.netlifyToken && options.githubToken) {
+      const netlifyGitHubTarget = new NetlifyGitHubTarget({
+        netlifyToken: options.netlifyToken,
+        githubToken: options.githubToken
+      });
+      this.targets.set('netlify-github', netlifyGitHubTarget);
+    }
+
+    // Initialize Local Zip target (always available)
+    const localZipTarget = new LocalZipTarget();
+    this.targets.set('local-zip', localZipTarget);
+
+    // Set preferred targets
+    this.preferredTargets = options.preferredTargets || ['cloudflare-pages', 'netlify', 'local-zip'];
+
+    logger.info('Deployment targets initialized', {
+      targets: Array.from(this.targets.keys()),
+      preferredTargets: this.preferredTargets
+    });
+  }
 }
 
 /**
- * Get the deployment manager instance (now returns a Promise)
- * Handles singleton pattern for the async initialization.
+ * Get a deployment manager instance
+ * This function is a singleton factory that returns the same instance
+ * or creates a new one if it doesn't exist yet
  */
-export function getDeploymentManager(options?: DeploymentManagerOptions): Promise<DeploymentManager> {
-  // If options are provided, force re-initialization by creating a new promise
-  // Otherwise, reuse the existing promise if available
-  if (options || !managerInitializationPromise) {
-      logger.debug(
-          `${managerInitializationPromise ? 'Re-initializing' : 'Initializing'} DeploymentManager asynchronously with options:`,
-          {
-              hasPreferredTargets: !!options?.preferredTargets,
-              hasCloudflareConfig: !!options?.cloudflareConfig,
-              hasNetlifyToken: !!options?.netlifyToken
-          }
-      );
-      // Store the promise of the new instance creation
-      managerInitializationPromise = DeploymentManager.create(options);
-  } else {
-      logger.debug('Reusing existing DeploymentManager initialization promise');
+export async function getDeploymentManager(options?: DeploymentManagerOptions): Promise<DeploymentManager> {
+  // Log the options to help with debugging
+  logger.info('Getting DeploymentManager with options:', { 
+    hasNetlifyToken: !!options?.netlifyToken,
+    hasGithubToken: !!options?.githubToken,
+    hasCloudflareConfig: !!(options?.cloudflareConfig?.accountId && options?.cloudflareConfig?.apiToken)
+  });
+
+  // Initialize if needed
+  if (managerInitializationPromise === null) {
+    managerInitializationPromise = DeploymentManager.create(options);
+  } else if (options) {
+    // If this is a re-initialization with new options, create a new promise
+    logger.info('Re-initializing DeploymentManager with new options');
+    managerInitializationPromise = DeploymentManager.create(options);
   }
 
+  // Return the manager
   return managerInitializationPromise;
 }
 

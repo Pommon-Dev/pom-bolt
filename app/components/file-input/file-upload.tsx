@@ -4,7 +4,6 @@ import { Input } from '~/components/ui/Input';
 import { useToast } from '~/components/ui/use-toast';
 import { Progress } from '~/components/ui/Progress';
 import { createScopedLogger } from '~/utils/logger';
-import type { RequirementsResponseData } from '~/routes/api.requirements';
 
 const logger = createScopedLogger('file-upload');
 
@@ -38,7 +37,13 @@ export function FileUpload({ onSendMessage }: FileUploadProps) {
           return;
         }
 
-        const data = (await response.json()) as RequirementsResponseData;
+        const data = await response.json() as {
+          hasRequirements: boolean;
+          processed: boolean;
+          projectId?: string;
+          content?: string;
+          timestamp?: string;
+        };
         logger.debug('Polled requirements API', {
           hasRequirements: data.hasRequirements,
           processed: data.processed,
@@ -234,9 +239,10 @@ export function FileUpload({ onSendMessage }: FileUploadProps) {
       });
 
       if (response.ok) {
+        const data = await response.json() as { success: boolean; projectId?: string };
         toast(`Test webhook triggered successfully${projectId ? ` for project ${projectId}` : ''}`);
       } else {
-        const data = (await response.json()) as { error?: string };
+        const data = await response.json() as { error?: string };
         toast(`Test webhook failed: ${data.error || 'Unknown error'}`);
       }
     } catch (error) {

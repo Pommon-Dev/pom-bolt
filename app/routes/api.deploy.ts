@@ -1,19 +1,29 @@
 import { json } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
+import { getProjectStorageService } from '~/lib/projects';
 import { getProjectStateManager } from '~/lib/projects';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
 import type { DeploymentStatus } from '~/lib/deployment/types';
 import { getCloudflareCredentials, getNetlifyCredentials, getGitHubCredentials } from '~/lib/deployment/credentials';
-
-// Define the environment variables we expect from Cloudflare
-interface EnvWithCloudflare {
-  CLOUDFLARE_ACCOUNT_ID?: string;
-  CLOUDFLARE_API_TOKEN?: string;
-  POM_BOLT_PROJECTS?: any;
-  [key: string]: any;
-}
+import type { EnvWithCloudflare } from '~/lib/environments';
+import type { ProjectFile } from '~/lib/projects/types';
+import type { EnhancedProjectState } from '~/lib/projects/enhanced-types';
 
 const logger = createScopedLogger('api-deploy');
+
+interface DeployResponse {
+  success: boolean;
+  deployment?: {
+    id: string;
+    url: string;
+    status: DeploymentStatus;
+    provider: string;
+  };
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
 
 /**
  * Route for deploying projects
@@ -47,7 +57,13 @@ export async function action({ request, context }: ActionFunctionArgs) {
     } = body;
 
     if (!projectId && Object.keys(files).length === 0) {
-      return json({ error: 'Either projectId or files must be provided' }, { status: 400 });
+      return json<DeployResponse>({ 
+        success: false,
+        error: { 
+          message: 'Either projectId or files must be provided',
+          code: 'INVALID_INPUT'
+        }
+      }, { status: 400 });
     }
     
     logger.info(`Handling deployment request for ${projectId ? `project ID ${projectId}` : `project ${projectName}`}`);
@@ -55,6 +71,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
     // Import the DeploymentWorkflowService
     const { getDeploymentWorkflowService } = await import('~/lib/deployment/deployment-workflow');
     const deploymentWorkflowService = getDeploymentWorkflowService();
+
+    // Get the enhanced storage service
+    const storageService = getProjectStorageService();
 
     // --- Credential Handling --- 
     // Set up credentials object for the workflow service
@@ -65,119 +84,74 @@ export async function action({ request, context }: ActionFunctionArgs) {
     const cfConfig = getCloudflareCredentials(context);
     if (cfConfig.accountId && cfConfig.apiToken) {
       credentials.cloudflare = cfConfig;
-      credSource = 'environment/context';
-    } else if (cfCredentials && cfCredentials.accountId && cfCredentials.apiToken) {
-      credentials.cloudflare = {
-        accountId: cfCredentials.accountId,
-        apiToken: cfCredentials.apiToken,
-        projectName: cfCredentials.projectName || 'genapps'
-      };
-      credSource = 'request (Cloudflare)';
+      credSource = 'env';
+    } else if (cfCredentials) {
+      credentials.cloudflare = cfCredentials;
+      credSource = 'request';
     }
-    
+
     // Netlify credentials
-    const netlifyToken = getNetlifyCredentials(context).apiToken;
-    if (netlifyToken) {
-      credentials.netlify = {
-        apiToken: netlifyToken
-      };
-      if (credSource === 'none') credSource = 'environment/context';
-    } else if (netlifyCredentials && netlifyCredentials.apiToken) {
-      credentials.netlify = {
-        apiToken: netlifyCredentials.apiToken
-      };
-      if (credSource === 'none') credSource = 'request (Netlify)';
+    if (netlifyCredentials?.apiToken) {
+      credentials.netlify = netlifyCredentials;
+      credSource = 'request';
     }
 
     // GitHub credentials
-    const githubCreds = getGitHubCredentials(context);
-    if (githubCreds.token) {
-      credentials.github = githubCreds;
-      if (credSource === 'none') credSource = 'environment/context';
-    } else if (githubCredentials && githubCredentials.token) {
-      credentials.github = {
-        token: githubCredentials.token,
-        owner: githubCredentials.owner || githubCreds.owner
-      };
-      if (credSource === 'none') credSource = 'request (GitHub)';
+    if (githubCredentials?.token) {
+      credentials.github = githubCredentials;
+      credSource = 'request';
     }
-    // --- End Credential Handling ---
-    
-    // Log credentials status (redacted)
-    logger.debug('Credentials status:', {
-      cfHasAccountId: !!credentials.cloudflare?.accountId,
-      cfHasApiToken: !!credentials.cloudflare?.apiToken,
-      cfComplete: !!(credentials.cloudflare?.accountId && credentials.cloudflare?.apiToken),
-      netlifyHasToken: !!credentials.netlify?.apiToken,
-      githubHasToken: !!credentials.github?.token,
-      source: credSource
-    });
 
-    // Get project manager to load project files if needed
-    const projectManager = getProjectStateManager();
+    logger.info(`Using credentials from ${credSource}`);
 
-    // If projectId is provided but files aren't, load files from storage
+    // --- Project Loading ---
+    let project: EnhancedProjectState | null = null;
     let deployFiles = files;
     let deployProjectName = projectName;
-    let project;
-    
-    if (projectId && Object.keys(files).length === 0) {
-      logger.debug(`Loading project files for ${projectId}`);
+
+    if (projectId) {
       try {
-        // First, handle the case where projectId might be an archive key
-        let isArchiveKey = false;
-        
-        // Check if this is actually an archive key
-        if (projectId.startsWith('project-') && (projectId.includes('.zip') || projectId.includes('-'))) {
-          logger.info(`ProjectId appears to be an archive key: ${projectId}`);
-          isArchiveKey = true;
-          
-          // Extract the real project ID from the archive key
-          // Format: project-UUID-TIMESTAMP.zip
-          const uuidMatch = projectId.match(/project-([0-9a-f-]+)-\d+/);
-          if (uuidMatch && uuidMatch[1]) {
-            const extractedUuid = uuidMatch[1];
-            logger.info(`Extracted UUID from archive key: ${extractedUuid}`);
-            
-            // Try to load the project with the extracted UUID
-            try {
-              project = await projectManager.getProject(extractedUuid);
-              logger.info(`Successfully loaded project from extracted UUID: ${extractedUuid}`);
-            } catch (e) {
-              logger.warn(`Could not load project with extracted UUID: ${extractedUuid}`);
+        // Use enhanced storage service to get project
+        project = await storageService.getProject(projectId);
+        if (!project) {
+          return json<DeployResponse>({ 
+            success: false,
+            error: { 
+              message: `Project ${projectId} not found`,
+              code: 'PROJECT_NOT_FOUND'
             }
-          }
-        }
-        
-        // If we couldn't get a project from an archive key, try direct lookup
-        if (!project) {
-          try {
-            project = await projectManager.getProject(projectId);
-          } catch (e) {
-            logger.error(`Failed to load project: ${projectId}`, e);
-            return json({ error: `Project ${projectId} not found` }, { status: 404 });
-          }
-        }
-        
-        if (!project) {
-          return json({ error: `Project ${projectId} not found` }, { status: 404 });
+          }, { status: 404 });
         }
         
         deployProjectName = project.name;
         
-        // Load project files
-        const projectFiles = await projectManager.getProjectFiles(projectId);
-        deployFiles = projectFiles.reduce((map, file) => {
-          map[file.path] = file.content;
+        // Load project files using enhanced storage
+        const projectFiles = await storageService.getProjectFiles(projectId);
+        deployFiles = projectFiles.reduce((map: Record<string, string>, file: ProjectFile) => {
+          if (!file.isDeleted) {
+            map[file.path] = file.content;
+          }
           return map;
         }, {} as Record<string, string>);
         
         if (Object.keys(deployFiles).length === 0) {
-          return json({ error: `No files found for project ${projectId}` }, { status: 400 });
+          return json<DeployResponse>({ 
+            success: false,
+            error: { 
+              message: `No files found for project ${projectId}`,
+              code: 'NO_FILES'
+            }
+          }, { status: 400 });
         }
       } catch (error) {
         logger.error(`[api.deploy] Error loading project files for ${projectId}: ${error}`);
-        return json({ error: `Failed to load project: ${error instanceof Error ? error.message : 'Unknown error'}` }, { status: 500 });
+        return json<DeployResponse>({ 
+          success: false,
+          error: { 
+            message: `Failed to load project: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            code: 'LOAD_ERROR'
+          }
+        }, { status: 500 });
       }
     }
     
@@ -199,17 +173,27 @@ export async function action({ request, context }: ActionFunctionArgs) {
     
     logger.info(`Deployment result: ${deployment.status}, URL: ${deployment.url}`);
     
-    // If projectId was provided, save the deployment to the project
+    // If projectId was provided, save the deployment to the project using enhanced storage
     if (projectId && project) {
-      await projectManager.addDeployment(projectId, {
+      await storageService.addDeployment(projectId, {
+        id: deployment.id || `deploy-${Date.now()}`,
         url: deployment.url,
         provider: deployment.provider,
         timestamp: Date.now(),
         status: deployment.status
       });
+
+      // Cache the deployment files for future use
+      try {
+        await storageService.cacheProjectFiles(projectId, deployFiles);
+        logger.info(`[api.deploy] Cached ${Object.keys(deployFiles).length} files for project ${projectId}`);
+      } catch (cacheError) {
+        logger.warn(`[api.deploy] Failed to cache project files: ${cacheError}`);
+        // Don't fail the request if caching fails
+      }
     }
     
-    return json({
+    return json<DeployResponse>({
       success: true,
       deployment: {
         id: deployment.id,
@@ -218,11 +202,14 @@ export async function action({ request, context }: ActionFunctionArgs) {
         provider: deployment.provider
       }
     });
-  } catch (error: any) {  
+  } catch (error) {
     logger.error('Error handling deployment request:', error);
-    return json({
+    return json<DeployResponse>({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error during deployment'
+      error: {
+        message: error instanceof Error ? error.message : 'Unknown error during deployment',
+        code: 'DEPLOYMENT_ERROR'
+      }
     }, { status: 500 });
   }
 }
@@ -265,51 +252,40 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     
     // Try each target until we find one that recognizes this deployment
     let deploymentStatus: DeploymentStatus | null = null;
+    let error: Error | null = null;
     
     for (const targetName of targetNames) {
       try {
-        // Try to get deployment status from this target
-        deploymentStatus = await deploymentManager.deployProject(targetName, {
-          projectId: 'status-check',
-          projectName: 'status-check',
-          files: {},
-          deploymentId
-        }).then(() => {
-          // This is a hack - we're creating a simulated status
-          // since we don't have direct access to each target's getDeploymentStatus
-          return {
-            id: deploymentId,
-            url: `https://${deploymentId}.pages.dev`,
-            status: 'success' as const,
-            logs: ['Deployment completed successfully'],
-            createdAt: Date.now() - 60000,
-            completedAt: Date.now()
-          };
-        }).catch(() => null);
-        
-        if (deploymentStatus) break;
-      } catch (error) {
-        // Continue to next target
-        logger.debug(`Target ${targetName} does not recognize deployment ${deploymentId}`);
+        const target = deploymentManager.getTarget(targetName);
+        if (target) {
+          deploymentStatus = await target.getDeploymentStatus(deploymentId);
+          if (deploymentStatus) {
+            break;
+          }
+        }
+      } catch (e) {
+        error = e instanceof Error ? e : new Error('Unknown error checking deployment status');
+        logger.warn(`Target ${targetName} failed to get deployment status:`, error);
       }
     }
     
+    if (!deploymentStatus && error) {
+      return json({ error: error.message }, { status: 500 });
+    }
+    
     if (!deploymentStatus) {
-      return json({
-        success: false,
-        error: `Deployment ${deploymentId} not found in any target`
-      }, { status: 404 });
+      return json({ error: 'Deployment not found' }, { status: 404 });
     }
     
     return json({
       success: true,
-      deployment: deploymentStatus
+      status: deploymentStatus
     });
   } catch (error) {
-    logger.error('Error getting deployment status:', error);
+    logger.error('Error checking deployment status:', error);
     return json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error checking deployment status'
     }, { status: 500 });
   }
 }

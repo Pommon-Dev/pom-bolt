@@ -1,163 +1,460 @@
-import { json } from '@remix-run/cloudflare';
-import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { json } from '@remix-run/node';
+import type { ActionFunction, LoaderFunctionArgs, ActionFunctionArgs } from '@remix-run/node';
+import { ProjectStateManager } from '~/lib/projects/state-manager';
+import { D1StorageAdapter } from '~/lib/projects/adapters/d1-storage-adapter';
+import type { RequirementsResponseData } from '~/lib/requirements/types';
+import type { RequirementsEntry } from '~/lib/requirements/types';
+import type { ProjectState } from '~/lib/projects/types';
 import { createScopedLogger } from '~/utils/logger';
-import { 
-  loadProjectContext, 
-  processRequirements, 
-  deployCode,
-  type RequirementsContext 
-} from '~/lib/middleware/requirements-chain';
+import type { D1Database } from '@cloudflare/workers-types';
+import { v4 as uuidv4 } from 'uuid';
+import { runRequirementsChain } from '~/lib/middleware/requirements-chain';
+import type { DeploymentResult } from '~/lib/deployment/types';
 
 const logger = createScopedLogger('api-requirements');
+
+interface CloudflareContext {
+  cloudflare: {
+    env: {
+      DB: D1Database;
+      POM_BOLT_PROJECTS: KVNamespace;
+    };
+  };
+}
+
+/**
+ * Error codes for requirements API errors
+ */
+export enum RequirementsApiErrorCode {
+  INVALID_REQUEST = 'INVALID_REQUEST',
+  PROCESSING_ERROR = 'PROCESSING_ERROR',
+  STORAGE_ERROR = 'STORAGE_ERROR',
+  VALIDATION_ERROR = 'VALIDATION_ERROR',
+  UNKNOWN_ERROR = 'UNKNOWN_ERROR'
+}
+
+/**
+ * Custom error class for requirements API errors
+ */
+export class RequirementsApiError extends Error {
+  constructor(
+    message: string,
+    public code: RequirementsApiErrorCode,
+    public originalError?: unknown,
+    public context?: Record<string, any>
+  ) {
+    super(message);
+    this.name = 'RequirementsApiError';
+  }
+
+  /**
+   * Create a validation error
+   */
+  static validation(message: string, context?: Record<string, any>): RequirementsApiError {
+    return new RequirementsApiError(
+      message,
+      RequirementsApiErrorCode.VALIDATION_ERROR,
+      undefined,
+      context
+    );
+  }
+
+  /**
+   * Create an error from another error
+   */
+  static fromError(
+    error: unknown,
+    code: RequirementsApiErrorCode,
+    message?: string,
+    context?: Record<string, any>
+  ): RequirementsApiError {
+    const errorMessage = message || (error instanceof Error ? error.message : 'Unknown error');
+    return new RequirementsApiError(
+      errorMessage,
+      code,
+      error,
+      context
+    );
+  }
+}
+
+/**
+ * Helper function to enhance requirements with status and priority
+ */
+function enhanceRequirements(requirementsEntries: any[]): RequirementsEntry[] {
+  return requirementsEntries.map(req => ({
+    id: req.id,
+    content: req.content,
+    timestamp: req.timestamp,
+    userId: req.userId,
+    metadata: req.metadata,
+    status: req.status || 'pending',
+    completedAt: req.completedAt
+  }));
+}
+
+/**
+ * Get or initialize the requirements project
+ */
+async function getOrCreateRequirementsProject(db: D1Database): Promise<ProjectState> {
+  // Try direct DB approach first for Cloudflare Pages environment
+  const d1Adapter = new D1StorageAdapter(db);
+  let requirementsProject = await d1Adapter.getProject('requirements');
+  
+  if (!requirementsProject) {
+    logger.info('Requirements project not found, creating it');
+    
+    // Initialize project
+    const now = Date.now();
+    requirementsProject = {
+      id: 'requirements',
+      name: 'Requirements Collection',
+      createdAt: now,
+      updatedAt: now,
+      files: [],
+      requirements: [],
+      deployments: [],
+      webhooks: [],
+      metadata: { type: 'requirements' }
+    };
+    
+    // Save to database
+    await d1Adapter.saveProject(requirementsProject);
+    
+    // Initialize project list if needed
+    const projectListKey = 'pom_bolt_project_list';
+    const projectList = await db
+      .prepare(`SELECT id FROM projects WHERE id = ?`)
+      .bind(projectListKey)
+      .first();
+    
+    if (!projectList) {
+      // Create project list
+      await db
+        .prepare(`INSERT INTO projects (id, name, metadata, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?)`)
+        .bind(
+          projectListKey,
+          'Project List',
+          JSON.stringify([{ id: 'requirements', createdAt: now, updatedAt: now }]),
+          now,
+          now
+        )
+        .run();
+    } else {
+      // Update project list
+      const listData = await db
+        .prepare(`SELECT metadata FROM projects WHERE id = ?`)
+        .bind(projectListKey)
+        .first();
+      
+      try {
+        const metadata = listData && listData.metadata ? 
+          (typeof listData.metadata === 'string' ? 
+            JSON.parse(listData.metadata) : 
+            listData.metadata
+          ) : [];
+        
+        const list = Array.isArray(metadata) ? metadata : [];
+        
+        if (!list.some(entry => entry.id === 'requirements')) {
+          list.push({ 
+            id: 'requirements', 
+            createdAt: now, 
+            updatedAt: now 
+          });
+          
+          await db
+            .prepare(`UPDATE projects SET metadata = ?, updated_at = ? WHERE id = ?`)
+            .bind(
+              JSON.stringify(list),
+              now,
+              projectListKey
+            )
+            .run();
+        }
+      } catch (error) {
+        logger.error('Error updating project list:', error);
+      }
+    }
+  }
+  
+  return requirementsProject;
+}
+
+/**
+ * Update requirements in the database
+ */
+async function updateRequirements(
+  db: D1Database, 
+  requirementsProject: ProjectState,
+  newRequirements: any[]
+): Promise<ProjectState> {
+  const d1Adapter = new D1StorageAdapter(db);
+  
+  // Add new requirements
+  const updatedProject: ProjectState = {
+    ...requirementsProject,
+    requirements: [
+      ...(requirementsProject.requirements || []),
+      ...newRequirements
+    ],
+    updatedAt: Date.now()
+  };
+  
+  // Save to database
+  await d1Adapter.saveProject(updatedProject);
+  
+  return updatedProject;
+}
 
 /**
  * GET handler for requirements API
  */
-export async function loader({ request }: LoaderFunctionArgs) {
-  // Return a simple status message
-  return json({
-    status: 'Requirements API is available',
-    method: 'POST',
-    description: 'Submit requirements to generate code and create/update a project',
-    schema: {
-      content: 'string (required) - Project requirements text',
-      deploy: 'boolean (optional) - Whether to deploy the generated code',
-      deploymentTarget: 'string (optional) - Deployment target platform',
-      projectId: 'string (optional) - Existing project ID to update',
-      additionalRequirement: 'boolean (optional) - Set to true to add features to existing project'
+export async function loader({ context }: LoaderFunctionArgs & { context: CloudflareContext }) {
+  try {
+    logger.debug('Loading requirements data');
+    
+    const d1 = context.cloudflare.env.DB;
+    if (!d1) {
+      logger.error('D1 database not available');
+      throw new Error('Database not available');
     }
-  });
+    
+    // Get or create requirements project
+    const requirementsProject = await getOrCreateRequirementsProject(d1);
+    
+    // Enhance requirements
+    const enhancedRequirements = enhanceRequirements(requirementsProject.requirements || []);
+
+    logger.info('Requirements loaded successfully', {
+      requirementsCount: enhancedRequirements.length,
+      webhooksCount: requirementsProject.webhooks?.length || 0
+    });
+
+    return json<RequirementsResponseData>({
+      success: true,
+      data: {
+        requirements: enhancedRequirements,
+        webhooks: requirementsProject.webhooks || []
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to load requirements:', error);
+    return json<RequirementsResponseData>({
+      success: false,
+      error: {
+        message: error instanceof Error ? error.message : 'Unknown error occurred',
+        code: RequirementsApiErrorCode.PROCESSING_ERROR
+      }
+    });
+  }
 }
 
 /**
  * API endpoint for handling requirements processing
  * POST /api/requirements - Process requirements and generate code/project
  */
-export async function action({ request, context }: ActionFunctionArgs) {
+export const action = async ({ request, context }: ActionFunctionArgs & { context: CloudflareContext }) => {
   try {
-    logger.info('🚀 [api.requirements] Processing requirements request');
-    
-    // Debug request headers
-    logger.debug('[api.requirements] Request headers:', {
-      contentType: request.headers.get('Content-Type'),
-      contentLength: request.headers.get('Content-Length'),
-      accept: request.headers.get('Accept')
+    logger.info('Running requirements processing chain', {
+      method: request.method,
+      url: request.url,
+      hasContext: !!context,
+      hasCloudflare: !!context?.cloudflare,
+      hasEnv: !!context?.cloudflare?.env,
+      envKeys: context?.cloudflare?.env ? Object.keys(context.cloudflare.env) : []
     });
+
+    // Determine request type - form data or JSON
+    const contentType = request.headers.get('Content-Type') || '';
+    let projectId, requirements, webhooks, shouldDeploy, targetName, netlifyCredentials, githubCredentials, setupGitHub;
     
-    // Parse the request body once
-    let reqBody;
-    try {
-      const clonedRequest = request.clone();
-      const rawBody = await clonedRequest.text();
+    if (contentType.includes('application/json')) {
+      // Handle JSON request
+      const body = await request.json() as {
+        projectId?: string;
+        requirements?: string;
+        content?: string;
+        webhooks?: string;
+        shouldDeploy?: boolean;
+        targetName?: string;
+        netlifyCredentials?: Record<string, any>;
+        githubCredentials?: Record<string, any>;
+        setupGitHub?: boolean;
+      };
       
-      logger.debug('[api.requirements] Raw request body:', { 
-        length: rawBody.length,
-        preview: rawBody.substring(0, 100) + (rawBody.length > 100 ? '...' : '')
-      });
-      
-      if (rawBody.trim().startsWith('{')) {
-        try {
-          reqBody = JSON.parse(rawBody);
-          logger.info('[api.requirements] Request body properties:', {
-            shouldDeploy: !!reqBody.shouldDeploy,
-            deploymentTarget: reqBody.deploymentTarget || 'not specified',
-            hasGithubCreds: !!reqBody.githubCredentials,
-            hasNetlifyCreds: !!reqBody.netlifyCredentials,
-            setupGitHub: !!reqBody.setupGitHub
-          });
-        } catch (e) {
-          logger.warn('[api.requirements] Failed to parse JSON body:', e);
-          reqBody = { content: rawBody };
-        }
-      } else {
-        reqBody = { content: rawBody };
-      }
-    } catch (e) {
-      logger.error('[api.requirements] Failed to read request body:', e);
-      return json({ 
-        success: false, 
-        error: 'Failed to read request body' 
-      }, { status: 400 });
-    }
-    
-    // Create initial requirements context with safe deploymentOptions
-    const deploymentOptions: Record<string, any> = reqBody.deploymentOptions || {};
-    
-    // Handle direct credential properties by moving them to deploymentOptions
-    if (reqBody.githubCredentials) {
-      deploymentOptions.githubCredentials = reqBody.githubCredentials;
-    }
-    
-    if (reqBody.setupGitHub) {
-      deploymentOptions.setupGitHub = Boolean(reqBody.setupGitHub);
-    }
-    
-    if (reqBody.netlifyCredentials) {
-      deploymentOptions.netlifyCredentials = reqBody.netlifyCredentials;
-    }
-    
-    if (reqBody.cfCredentials) {
-      deploymentOptions.cfCredentials = reqBody.cfCredentials;
-    }
-    
-    const initialContext: RequirementsContext = {
-      content: reqBody.content || reqBody.requirements || '',
-      projectId: reqBody.projectId || reqBody.id || '',
-      isNewProject: !reqBody.projectId && !reqBody.id,
-      shouldDeploy: Boolean(reqBody.shouldDeploy || reqBody.deploy || reqBody.deployment || reqBody.deployTarget),
-      deploymentTarget: reqBody.deploymentTarget || reqBody.deployTarget,
-      deploymentOptions,
-      files: {},
-      additionalRequirement: Boolean(reqBody.additionalRequirement),
-      userId: reqBody.userId,
-      env: (context as any)?.env
-    };
-    
-    logger.info('🔄 [api.requirements] Running requirements chain with context:', {
-      hasContent: initialContext.content.length > 0,
-      projectId: initialContext.projectId || 'new project',
-      shouldDeploy: initialContext.shouldDeploy,
-      deploymentTarget: initialContext.deploymentTarget || 'auto',
-      hasOptions: Object.keys(deploymentOptions).length > 0
-    });
-    
-    // Load project context
-    let projectContext = await loadProjectContext(initialContext, request);
-    
-    // Process requirements
-    let result = await processRequirements(projectContext, request);
-    
-    // Handle deployment if requested
-    if (result.shouldDeploy) {
-      logger.info('[api.requirements] Starting deployment process');
-      result = await deployCode(result);
+      projectId = body.projectId;
+      requirements = body.requirements || body.content;
+      webhooks = body.webhooks;
+      shouldDeploy = body.shouldDeploy;
+      targetName = body.targetName;
+      netlifyCredentials = body.netlifyCredentials;
+      githubCredentials = body.githubCredentials;
+      setupGitHub = body.setupGitHub;
     } else {
-      logger.info('[api.requirements] Skipping deployment (not requested)');
+      // Handle form data request
+      const formData = await request.formData();
+      projectId = formData.get('projectId') as string;
+      requirements = formData.get('requirements');
+      webhooks = formData.get('webhooks');
+      shouldDeploy = formData.get('shouldDeploy') === 'true';
+      targetName = formData.get('targetName') as string;
+      
+      // Try to parse credentials if provided as strings
+      try {
+        const netlifyCredsStr = formData.get('netlifyCredentials');
+        if (netlifyCredsStr) {
+          netlifyCredentials = JSON.parse(netlifyCredsStr as string);
+        }
+        
+        const githubCredsStr = formData.get('githubCredentials');
+        if (githubCredsStr) {
+          githubCredentials = JSON.parse(githubCredsStr as string);
+        }
+      } catch (error) {
+        logger.warn('Failed to parse credentials from form data:', error);
+      }
+      
+      setupGitHub = formData.get('setupGitHub') === 'true';
+    }
+
+    // Validate inputs
+    if (!requirements) {
+      throw new Error('Missing requirements content');
     }
     
-    logger.info('✅ [api.requirements] Processing completed', {
-      projectId: result.projectId,
-      filesGenerated: result.files ? Object.keys(result.files).length : 0,
-      deploymentStatus: result.deploymentResult?.status || 'not requested',
-      deploymentUrl: result.deploymentResult?.url || 'N/A'
+    // Special case for the requirements collection project
+    if (projectId === 'requirements') {
+      logger.info('Handling special case for requirements collection project');
+      // Just use the existing storage logic for the requirements collection project
+      const d1 = context.cloudflare.env.DB;
+      if (!d1) {
+        logger.error('D1 database not available');
+        throw new Error('Database not available');
+      }
+
+      // Parse requirements if it's JSON
+      let parsedRequirements: any[] = [];
+      try {
+        const reqData = JSON.parse(requirements as string);
+        parsedRequirements = Array.isArray(reqData) ? reqData : [{
+          id: `req-${Date.now()}`,
+          content: requirements as string,
+          timestamp: Date.now(),
+          status: 'pending',
+          completedAt: undefined,
+        }];
+      } catch (e) {
+        // If not valid JSON, treat as a single requirement text
+        parsedRequirements = [{
+          id: `req-${Date.now()}`,
+          content: requirements as string,
+          timestamp: Date.now(),
+          status: 'pending',
+          completedAt: undefined,
+        }];
+      }
+
+      // Parse webhooks if provided
+      let webhooksList = [];
+      if (webhooks) {
+        try {
+          webhooksList = JSON.parse(webhooks as string);
+        } catch (e) {
+          logger.warn('Failed to parse webhooks JSON', e);
+        }
+      }
+
+      // Get or create requirements project
+      const requirementsProject = await getOrCreateRequirementsProject(d1);
+      
+      // Update requirements
+      const updatedProject = await updateRequirements(d1, requirementsProject, parsedRequirements);
+      
+      // Update webhooks if provided
+      if (webhooks) {
+        const d1Adapter = new D1StorageAdapter(d1);
+        await d1Adapter.updateProject('requirements', {
+          webhooks: webhooksList
+        });
+      }
+      
+      return json<RequirementsResponseData>({
+        success: true,
+        data: {
+          requirements: enhanceRequirements(updatedProject.requirements || []),
+          webhooks: updatedProject.webhooks || webhooksList
+        }
+      });
+    }
+    
+    // For regular project generation, use the requirements chain
+    logger.info('Running requirements processing chain', { 
+      newProject: !projectId,
+      shouldDeploy,
+      targetName
     });
+    
+    // Create a modified request with the necessary data for the requirements chain
+    const modifiedRequest = new Request(request.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': request.headers.get('Cookie') || ''
+      },
+      body: JSON.stringify({
+        projectId,
+        content: requirements,
+        shouldDeploy: shouldDeploy || false,
+        deploymentTarget: targetName || 'auto',
+        deploymentOptions: {
+          netlifyCredentials,
+          githubCredentials,
+          setupGitHub
+        }
+      })
+    });
+    
+    // Run the requirements chain
+    const result = await runRequirementsChain(modifiedRequest, context);
+    
+    // Handle errors from the chain
+    if (result.error) {
+      logger.error('Error in requirements chain:', result.error);
+      throw result.error;
+    }
     
     // Return the result
     return json({
       success: true,
-      projectId: result.projectId,
-      isNewProject: result.isNewProject,
-      filesGenerated: result.files ? Object.keys(result.files).length : 0,
-      deployment: result.deploymentResult,
-      archive: result.archiveKey ? { key: result.archiveKey } : undefined,
-      error: result.error ? result.error.message : undefined
+      data: {
+        projectId: result.projectId,
+        files: Object.keys(result.files || {}).length,
+        isNewProject: result.isNewProject,
+        deployment: result.deploymentResult as DeploymentResult
+      }
     });
   } catch (error) {
-    logger.error('❌ [api.requirements] Error processing requirements:', error);
-    return json({
+    logger.error('Failed to process requirements:', error);
+    
+    if (error instanceof RequirementsApiError) {
+      return json<RequirementsResponseData>({
+        success: false,
+        error: {
+          message: error.message,
+          code: error.code,
+          context: error.context
+        }
+      });
+    }
+
+    return json<RequirementsResponseData>({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error processing requirements',
-      stack: error instanceof Error ? error.stack : undefined
-    }, { status: 500 });
+      error: {
+        message: error instanceof Error ? error.message : 'Unknown error occurred',
+        code: RequirementsApiErrorCode.PROCESSING_ERROR
+      }
+    });
   }
-}
+};

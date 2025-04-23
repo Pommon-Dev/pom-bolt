@@ -365,18 +365,17 @@ export class DeploymentWorkflowService {
       metadata = {}
     } = options;
 
-    // Create initial workflow context
-    let context = this.createWorkflowContext(options);
-    
-    logger.info(`Starting deployment workflow for project: ${projectId} (${projectName})`, {
-      target: targetName || 'auto-select',
-      setupGitHub: context.setupGitHub,
-      hasGithubCredentials: !!context.github?.token,
-      hasNetlifyCredentials: !!context.netlify?.apiToken,
-      hasCloudflareCredentials: !!(context.cloudflare?.accountId && context.cloudflare?.apiToken)
+    logger.info(`Starting deployment for project ${projectId} (${projectName}) with target ${targetName || 'auto'}`, {
+      hasGithubCreds: !!options.credentials?.github?.token,
+      hasNetlifyCreds: !!options.credentials?.netlify?.apiToken,
+      setupGitHub: options.setupGitHub,
+      targetName
     });
 
     try {
+      // Create initial workflow context
+      let context = this.createWorkflowContext(options);
+      
       // Step 1: Load project metadata
       let combinedMetadata: Record<string, any>;
       ({ context, metadata: combinedMetadata } = await this.loadProjectMetadata(context, metadata));

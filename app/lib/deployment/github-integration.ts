@@ -69,7 +69,26 @@ export class GitHubIntegrationService {
       const metadata = { ...(config.metadata || {}) };
       const trackingData: GitHubTrackingMetadata = this.extractGitHubMetadata(metadata);
       
-      logger.info(`Setting up GitHub repository for project: ${config.projectId} (${config.projectName})`);
+      logger.info(`Setting up GitHub repository for project: ${config.projectId} (${config.projectName})`, {
+        hasExistingMetadata: !!config.metadata,
+        metadataKeys: config.metadata ? Object.keys(config.metadata) : [],
+        hasFiles: Object.keys(config.files).length > 0
+      });
+      
+      logger.debug('GitHub setup config:', {
+        projectId: config.projectId,
+        projectName: config.projectName,
+        hasToken: !!config.token,
+        tokenLength: config.token ? config.token.length : 0,
+        owner: config.owner || 'default owner',
+        filesCount: Object.keys(config.files).length,
+        trackingData: {
+          repoCreated: trackingData.repoCreated,
+          filesUploaded: trackingData.filesUploaded,
+          githubRepo: trackingData.githubRepo,
+          hasGithubInfo: !!trackingData.github
+        }
+      });
       
       // Check if we already have a repository for this project
       if (trackingData.repoCreated && trackingData.github) {
@@ -94,6 +113,7 @@ export class GitHubIntegrationService {
       });
       
       // Validate token first
+      logger.debug('Validating GitHub token...');
       const isTokenValid = await github.validateToken();
       if (!isTokenValid) {
         const errorMsg = 'Invalid GitHub token. Please check your credentials.';
@@ -104,10 +124,14 @@ export class GitHubIntegrationService {
           error: errorMsg
         };
       }
+      logger.debug('GitHub token validation successful');
       
       // Create repository
       const repositoryName = this.createUniqueRepositoryName(config.projectName, config.projectId);
-      logger.info(`Creating GitHub repository: ${repositoryName}`);
+      logger.info(`Creating GitHub repository: ${repositoryName}`, {
+        owner: config.owner || 'default owner',
+        isPrivate: config.isPrivate !== undefined ? config.isPrivate : true
+      });
       
       const repoMetadata = await github.createRepository({
         name: repositoryName,

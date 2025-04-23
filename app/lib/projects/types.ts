@@ -64,6 +64,7 @@ export interface ProjectState {
   deployments: ProjectDeployment[]; // History of deployments
   currentDeploymentId?: string; // ID of the current active deployment
   metadata?: Record<string, any>; // Additional metadata about this project
+  webhooks?: any[]; // Webhooks associated with this project
 }
 
 /**
@@ -124,6 +125,7 @@ export interface UpdateProjectOptions {
   deletedFilePaths?: string[]; // Paths of files to delete
   newRequirements?: string; // New requirements to add
   metadata?: Record<string, any>; // Metadata to merge with existing metadata
+  webhooks?: any[]; // Webhooks to add or update
 }
 
 /**

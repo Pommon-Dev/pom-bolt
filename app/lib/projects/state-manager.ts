@@ -15,6 +15,8 @@ import type {
 import { ProjectErrorType } from './types';
 import { LocalProjectStorage } from './persistence/local';
 import { CloudflareProjectStorage } from './persistence/cloudflare';
+import { ProjectStorageService } from './persistence/storage-service';
+import type { EnhancedProjectState } from './enhanced-types';
 
 const logger = createScopedLogger('project-state-manager');
 
@@ -24,9 +26,12 @@ const logger = createScopedLogger('project-state-manager');
  */
 export class ProjectStateManager {
   private storageAdapter: ProjectStorageAdapter;
+  private enhancedStorageService: ProjectStorageService | null = null;
   
   constructor(context?: any) {
     this.storageAdapter = this.selectStorageAdapter(context);
+    this.enhancedStorageService = this.createEnhancedStorageService(context);
+    logger.info('ProjectStateManager initialized with storage adapter');
   }
   
   /**
@@ -54,74 +59,129 @@ export class ProjectStateManager {
   }
   
   /**
+   * Create the enhanced storage service if Cloudflare environment is available
+   */
+  private createEnhancedStorageService(context?: any): ProjectStorageService | null {
+    const environment = getEnvironment(context);
+    const envInfo = environment.getInfo();
+    
+    if (envInfo.type === EnvironmentType.CLOUDFLARE && context?.cloudflare) {
+      const { DB, FILE_STORAGE, CACHE_STORAGE } = context.cloudflare.env;
+      
+      if (DB && FILE_STORAGE && CACHE_STORAGE) {
+        logger.info('Creating enhanced storage service with D1 and KV');
+        return new ProjectStorageService(DB, FILE_STORAGE, CACHE_STORAGE);
+      }
+    }
+    
+    logger.info('Enhanced storage service not available, using legacy storage adapter');
+    return null;
+  }
+  
+  /**
    * Create a new project
    */
   async createProject(options: CreateProjectOptions): Promise<ProjectState> {
-    const now = Date.now();
-    const projectId = uuidv4();
-    
-    logger.info(`Creating new project: ${options.name} (${projectId})`);
-    
-    // Initialize the requirements entry if provided
-    const requirements: RequirementsEntry[] = [];
-    if (options.initialRequirements) {
-      requirements.push({
-        id: uuidv4(),
-        content: options.initialRequirements,
-        timestamp: now,
-        userId: options.userId
-      });
-    }
-    
-    // Create the initial project state
-    const project: ProjectState = {
-      id: projectId,
+    logger.debug('Creating new project', { 
       name: options.name,
-      createdAt: now,
-      updatedAt: now,
-      files: [],
-      requirements,
-      deployments: [],
-      metadata: {
-        ...options.metadata,
-        userId: options.userId
+      metadata: options.metadata
+    });
+    try {
+      const now = Date.now();
+      const projectId = uuidv4();
+      
+      logger.info(`Creating new project: ${options.name} (${projectId})`);
+      
+      // Initialize the requirements entry if provided
+      const requirements: RequirementsEntry[] = [];
+      if (options.initialRequirements) {
+        requirements.push({
+          id: uuidv4(),
+          content: options.initialRequirements,
+          timestamp: now,
+          userId: options.userId
+        });
       }
-    };
-    
-    // Save the project
-    await this.storageAdapter.saveProject(project);
-    
-    return project;
+      
+      // Create the initial project state
+      const project: ProjectState = {
+        id: projectId,
+        name: options.name,
+        createdAt: now,
+        updatedAt: now,
+        files: [],
+        requirements,
+        deployments: [],
+        metadata: {
+          ...options.metadata,
+          userId: options.userId
+        }
+      };
+      
+      // Save the project using the appropriate storage mechanism
+      if (this.enhancedStorageService) {
+        // Convert to enhanced project state
+        const enhancedProject = this.convertToEnhancedProject(project);
+        await this.enhancedStorageService.saveProject(enhancedProject);
+      } else {
+        await this.storageAdapter.saveProject(project);
+      }
+      
+      logger.info('Project created successfully', { 
+        id: project.id,
+        name: project.name
+      });
+      return project;
+    } catch (error) {
+      logger.error('Error creating project:', error);
+      throw error;
+    }
   }
   
   /**
    * Get a project by ID
    */
-  async getProject(id: string): Promise<ProjectState> {
-    logger.debug(`Getting project: ${id}`);
-    
-    const project = await this.storageAdapter.getProject(id);
-    if (!project) {
-      const error = new Error(`Project not found: ${id}`);
-      error.name = ProjectErrorType.NOT_FOUND;
+  async getProject(id: string): Promise<ProjectState | null> {
+    logger.debug(`Getting project ${id}`);
+    try {
+      let project: ProjectState | null = null;
+      
+      if (this.enhancedStorageService) {
+        const enhancedProject = await this.enhancedStorageService.getProject(id);
+        if (enhancedProject) {
+          project = this.convertFromEnhancedProject(enhancedProject);
+        }
+      } else {
+        project = await this.storageAdapter.getProject(id);
+      }
+      
+      logger.debug(`Project ${id} retrieval result:`, { 
+        found: !!project,
+        projectName: project?.name
+      });
+      return project;
+    } catch (error) {
+      logger.error(`Error getting project ${id}:`, error);
       throw error;
     }
-    
-    return project;
   }
   
   /**
    * Check if a project exists
    */
   async projectExists(id: string): Promise<boolean> {
+    logger.debug(`Checking if project ${id} exists`);
     try {
-      logger.debug(`Checking if project ${id} exists...`);
-      const exists = await this.storageAdapter.projectExists(id);
-      logger.debug(`Project ${id} exists: ${exists}`);
-      return exists;
+      if (this.enhancedStorageService) {
+        return this.enhancedStorageService.projectExists(id);
+      } else {
+        const exists = await this.storageAdapter.projectExists(id);
+        logger.debug(`Project ${id} exists: ${exists}`);
+        return exists;
+      }
     } catch (error) {
       logger.error(`Error checking if project ${id} exists:`, error);
-      return false;
+      throw error;
     }
   }
   
@@ -205,8 +265,14 @@ export class ProjectStateManager {
     // Update the timestamp
     project.updatedAt = Date.now();
     
-    // Save the updated project
-    await this.storageAdapter.saveProject(project);
+    // Save the updated project using the appropriate storage mechanism
+    if (this.enhancedStorageService) {
+      // Convert to enhanced project state
+      const enhancedProject = this.convertToEnhancedProject(project);
+      await this.enhancedStorageService.saveProject(enhancedProject);
+    } else {
+      await this.storageAdapter.saveProject(project);
+    }
     
     return {
       success: true,
@@ -221,8 +287,19 @@ export class ProjectStateManager {
    * Delete a project
    */
   async deleteProject(id: string): Promise<boolean> {
-    logger.debug(`Deleting project: ${id}`);
-    return this.storageAdapter.deleteProject(id);
+    logger.debug(`Deleting project ${id}`);
+    try {
+      if (this.enhancedStorageService) {
+        return this.enhancedStorageService.deleteProject(id);
+      } else {
+        const result = await this.storageAdapter.deleteProject(id);
+        logger.debug(`Project ${id} deletion result: ${result}`);
+        return result;
+      }
+    } catch (error) {
+      logger.error(`Error deleting project ${id}:`, error);
+      throw error;
+    }
   }
   
   /**
@@ -239,7 +316,44 @@ export class ProjectStateManager {
     total: number;
   }> {
     logger.debug('Listing projects', options);
-    return this.storageAdapter.listProjects(options);
+    try {
+      if (this.enhancedStorageService) {
+        // Convert options to search options
+        const searchOptions = {
+          query: '',
+          filters: {
+            // Add any relevant filters based on the options
+            // Note: userId is not part of the SearchProjectsOptions filters
+          },
+          pagination: options?.limit ? {
+            limit: options.limit,
+            offset: options?.offset || 0
+          } : undefined,
+          sort: options?.sortBy ? {
+            field: options.sortBy,
+            direction: options?.sortDirection || 'desc'
+          } : undefined
+        };
+        
+        const result = await this.enhancedStorageService.searchProjects(searchOptions);
+        
+        // Convert enhanced projects to regular projects
+        const projects = result.projects.map(p => this.convertFromEnhancedProject(p));
+        logger.debug('Projects listed successfully', { 
+          count: projects.length,
+          total: result.total
+        });
+        return {
+          projects,
+          total: result.total
+        };
+      } else {
+        return this.storageAdapter.listProjects(options);
+      }
+    } catch (error) {
+      logger.error('Error listing projects:', error);
+      throw error;
+    }
   }
   
   /**
@@ -293,7 +407,14 @@ export class ProjectStateManager {
     project.currentDeploymentId = deploymentId;
     project.updatedAt = Date.now();
     
-    await this.storageAdapter.saveProject(project);
+    // Save the updated project using the appropriate storage mechanism
+    if (this.enhancedStorageService) {
+      // Convert to enhanced project state
+      const enhancedProject = this.convertToEnhancedProject(project);
+      await this.enhancedStorageService.saveProject(enhancedProject);
+    } else {
+      await this.storageAdapter.saveProject(project);
+    }
     
     return newDeployment;
   }
@@ -380,11 +501,123 @@ export class ProjectStateManager {
     project.requirements.push(requirementsEntry);
     project.updatedAt = Date.now();
     
-    // Save the updated project
-    await this.storageAdapter.saveProject(project);
+    // Save the updated project using the appropriate storage mechanism
+    if (this.enhancedStorageService) {
+      // Convert to enhanced project state
+      const enhancedProject = this.convertToEnhancedProject(project);
+      await this.enhancedStorageService.saveProject(enhancedProject);
+    } else {
+      await this.storageAdapter.saveProject(project);
+    }
     
     logger.info(`Added requirements entry to project ${projectId}`);
     return requirementsEntry;
+  }
+  
+  /**
+   * Helper method to convert a regular project to an enhanced project
+   */
+  private convertToEnhancedProject(project: ProjectState): EnhancedProjectState {
+    // Create a basic enhanced project with the same core properties
+    const enhancedProject: EnhancedProjectState = {
+      ...project,
+      metadata: {
+        version: 1,
+        type: 'new-project',
+        description: project.name,
+        tags: [],
+        searchIndex: {
+          keywords: [],
+          features: [],
+          technologies: []
+        }
+      },
+      files: project.files.map(file => ({
+        ...file,
+        chunks: file.content ? Math.ceil(file.content.length / (1024 * 1024)) : 0,
+        hash: '', // This would be calculated in a real implementation
+        size: file.content ? file.content.length : 0
+      }))
+    };
+    
+    // If the project already has metadata, merge it
+    if (project.metadata) {
+      enhancedProject.metadata = {
+        ...enhancedProject.metadata,
+        ...project.metadata
+      };
+    }
+    
+    return enhancedProject;
+  }
+  
+  /**
+   * Helper method to convert an enhanced project to a regular project
+   */
+  private convertFromEnhancedProject(enhancedProject: EnhancedProjectState): ProjectState {
+    // Create a basic project with the same core properties
+    const project: ProjectState = {
+      id: enhancedProject.id,
+      name: enhancedProject.name,
+      createdAt: enhancedProject.createdAt,
+      updatedAt: enhancedProject.updatedAt,
+      files: enhancedProject.files.map(file => ({
+        path: file.path,
+        content: file.content || '',
+        createdAt: file.createdAt,
+        updatedAt: file.updatedAt,
+        isDeleted: file.isDeleted || false
+      })),
+      requirements: enhancedProject.requirements,
+      deployments: enhancedProject.deployments,
+      currentDeploymentId: enhancedProject.currentDeploymentId,
+      metadata: enhancedProject.metadata
+    };
+    
+    return project;
+  }
+
+  /**
+   * Save project files
+   */
+  public async saveProjectFiles(projectId: string, files: ProjectFile[]): Promise<void> {
+    try {
+      const project = await this.getProject(projectId);
+      if (!project) {
+        throw new Error(`Project ${projectId} not found`);
+      }
+
+      // Update project files
+      project.files = files;
+      project.updatedAt = Date.now();
+
+      // Save updated project
+      await this.saveProject(project);
+    } catch (error) {
+      logger.error(`Failed to save project files for ${projectId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Save a project
+   */
+  public async saveProject(project: ProjectState): Promise<void> {
+    logger.debug(`Saving project ${project.id}`);
+    try {
+      if (this.enhancedStorageService) {
+        // Convert to enhanced project state
+        const enhancedProject = this.convertToEnhancedProject(project);
+        await this.enhancedStorageService.saveProject(enhancedProject);
+      } else {
+        await this.storageAdapter.saveProject(project);
+      }
+      
+      logger.debug(`Project ${project.id} saved successfully`);
+    } catch (error) {
+      logger.error(`Error saving project ${project.id}:`, error);
+      throw error;
+    }
   }
 }
 

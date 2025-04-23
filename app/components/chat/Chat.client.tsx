@@ -26,6 +26,7 @@ import { getTemplates, selectStarterTemplate } from '~/utils/selectStarterTempla
 import { logStore } from '~/lib/stores/logs';
 import { streamingState } from '~/lib/stores/streaming';
 import { filesToArtifacts } from '~/utils/fileUtils';
+import { ProjectService } from '~/lib/services/project-service';
 
 const toastAnimation = cssTransition({
   enter: 'animated fadeInRight',
@@ -50,6 +51,59 @@ export function Chat() {
   useEffect(() => {
     workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
   }, [initialMessages]);
+
+  // Effect to sync chat messages with project requirements
+  useEffect(() => {
+    if (!ready || initialMessages.length === 0) return;
+
+    const syncRequirementsToProject = async () => {
+      try {
+        // Get the current project ID from the URL if available
+        const currentPath = window.location.pathname;
+        const projectId = currentPath.startsWith('/chat/') ? currentPath.split('/')[2] : null;
+        
+        if (!projectId) return;
+        
+        logger.debug('Syncing chat messages to project', { projectId, messageCount: initialMessages.length });
+        
+        // Get user messages to use as requirements
+        const userMessages = initialMessages.filter(m => m.role === 'user' && !m.annotations?.includes('hidden'));
+        
+        if (userMessages.length === 0) return;
+        
+        // Create or update the project
+        const existingProject = ProjectService.getProject(projectId);
+        
+        if (existingProject) {
+          // If project exists, just make sure it's synced
+          logger.info('Ensuring project is synced with backend', { projectId });
+          // No need to update content, just ensure sync
+          await ProjectService.updateProject(projectId, { 
+            name: title || existingProject.name
+          });
+        } else {
+          // Create new project with this ID and the first user message as requirements
+          const firstUserMessage = userMessages[0];
+          const content = typeof firstUserMessage.content === 'string' 
+            ? firstUserMessage.content 
+            : JSON.stringify(firstUserMessage.content);
+            
+          logger.info('Creating new project from chat', { projectId });
+          
+          await ProjectService.createProject({
+            id: projectId,
+            name: title || 'Chat Project',
+            requirements: content
+          });
+        }
+      } catch (error) {
+        logger.error('Failed to sync chat to project', error);
+        // Don't show toast to user - this is a background sync
+      }
+    };
+    
+    syncRequirementsToProject();
+  }, [ready, initialMessages, title]);
 
   return (
     <>

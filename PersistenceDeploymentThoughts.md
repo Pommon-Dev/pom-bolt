@@ -959,3 +959,277 @@ Maintain support for both approaches (WebContainer and deployment) with user cho
 This compatibility-preserving approach is feasible with careful planning and a commitment to non-breaking changes. By implementing new features as extensions rather than replacements, and using feature flags to control rollout, compatibility with the existing chat stream, chat history, and WebContainer preview functionality can be maintained while building toward a more robust deployment system.
 
 The key principle should be "extend, don't replace" until the new system is fully compatible and tested. 
+
+## Data Flow Diagram
+
+```
+                    +----------------+
+                    | User Input     |
+                    | (Requirements) |
+                    +-------+--------+
+                            |
+                            v
+                    +-------+--------+
+                    | AI Processing  |
+                    | (Chat System)  |
+                    +-------+--------+
+                            |
+                            v
+          +----------------+------------------+
+          |                |                  |
+          v                v                  v
+   +------+-----+  +-------+-------+  +-------+-------+
+   | Code Gen    |  | Configuration |  | Deployment   |
+   | Generation  |  | Files         |  | Instructions |
+   +------+-----+  +-------+-------+  +-------+-------+
+          |                |                  |
+          +----------------+------------------+
+                            |
+                            v
+                    +-------+--------+
+                    | Project        |
+                    | Management     |
+                    +-------+--------+
+                            |
+              +-------------+-------------+
+              |             |             |
+              v             v             v
+      +-------+---+  +------+----+  +----+------+
+      | D1 Database|  | KV Storage |  | File     |
+      | (Metadata) |  | (Projects) |  | Storage  |
+      +-----------+|  +-----------+|  +---------+|
+                   |               |             |
+                   v               v             v
+           +-------+---------------+-------------+-----+
+           |           Deployment Process             |
+           +------------------+----------------------+|
+                              |
+          +------------------+v--------------------+
+          |                  |                     |
+          v                  v                     v
+  +-------+-------+  +-------+--------+    +-------+-------+
+  | Netlify       |  | Cloudflare     |    | Local ZIP     |
+  | Deployment    |  | Pages          |    | Generation    |
+  +---------------+  +----------------+    +---------------+
+```
+
+## Deployment Architectures
+
+Pom-Bolt supports multiple deployment architectures:
+
+1. **Cloudflare Pages Deployment**
+   - Uses Cloudflare Pages for hosting
+   - Leverages Cloudflare D1 for database
+   - Uses KV storage for project files and caching
+   - Most suitable for production deployments
+
+2. **Netlify Deployment (Default)**
+   - Creates Netlify sites for projects
+   - Uses Netlify API for deployment
+   - Requires Netlify Personal Access Token
+   - Prioritized in the deployment manager
+
+3. **Local ZIP Deployment (Fallback)**
+   - Generates downloadable ZIP packages
+   - No external hosting
+   - Always available as fallback
+   - Used when other deployment options aren't available
+
+4. **Docker Deployment**
+   - Container-based deployment
+   - Supports both development and production environments
+   - Configurable via docker-compose.yaml
+   - Can be deployed to any container orchestration platform
+
+## Key Components
+
+1. **Chat Component**
+   - Handles AI interactions
+   - Manages message history
+   - Supports file and image uploads
+   - Integrates with multiple AI models and providers
+
+2. **Project Management**
+   - Creates and manages projects
+   - Handles file operations
+   - Synchronizes project state
+   - Persists metadata in D1 database
+
+3. **Deployment System**
+   - Manages multiple deployment targets
+   - Handles credentials
+   - Provides fallback mechanisms
+   - Tracks deployment status
+
+4. **Storage Infrastructure**
+   - D1 Database for project metadata
+   - KV Storage for project files
+   - Cache system for performance optimization
+
+The application is built using modern web technologies:
+- React for the frontend components
+- Remix for server-side rendering and routing
+- TypeScript for type safety
+- Cloudflare Workers for serverless functionality
+- Vite for fast development and optimized builds
+
+This modular architecture allows for extensibility and ensures that the application can adapt to different deployment environments while maintaining a consistent user experience.
+
+## 6. Pom-Bolt Architecture Overview
+
+### Architecture Diagram
+
+```
+                         +----------------------+
+                         |      User Interface  |
+                         |  (React/Remix/Vite)  |
+                         +----------+-----------+
+                                    |
+                         +----------v-----------+
+                         |  Application Core     |
+                         |  (Component System)   |
+                         +--+----------------+---+
+                            |                |
++---------------------------v--+         +---v---------------------+
+|  AI System/Chat Component    |         |  Project Management     |
+|  - Chat interactions         |         |  - Project creation     |
+|  - Prompt handling           |<------->|  - File management      |
+|  - Model/Provider selection  |         |  - Persistence          |
+|  - File/Image uploading      |         |  - Sync                 |
++---------------------------+--+         +---+---------------------+
+                            |                |
+                            |                |
+                +-----------v----------------v---------------+
+                |          Deployment System                 |
+                |  - Multiple deployment targets             |
+                |  - Target selection/fallback               |
+                |  - Credentials management                  |
+                +--+----------------+---------------+--------+
+                   |                |               |
+      +------------v-----+  +-------v--------+  +--v---------------+
+      |  Netlify Target  |  | Cloudflare     |  | LocalZip         |
+      |  (Default)       |  | Pages Target   |  | Target (Fallback)|
+      +-----------------+|  +----------------+  +-----------------+|
+                        |                                         |
+                        v                                         v
+               +----------------+                       +-----------------+
+               | Netlify API    |                       | ZIP Package     |
+               | Integration    |                       | Generation      |
+               +----------------+                       +-----------------+
+```
+
+### Data Flow Diagram
+
+```
+                    +----------------+
+                    | User Input     |
+                    | (Requirements) |
+                    +-------+--------+
+                            |
+                            v
+                    +-------+--------+
+                    | AI Processing  |
+                    | (Chat System)  |
+                    +-------+--------+
+                            |
+                            v
+          +----------------+------------------+
+          |                |                  |
+          v                v                  v
+   +------+-----+  +-------+-------+  +-------+-------+
+   | Code Gen    |  | Configuration |  | Deployment   |
+   | Generation  |  | Files         |  | Instructions |
+   +------+-----+  +-------+-------+  +-------+-------+
+          |                |                  |
+          +----------------+------------------+
+                            |
+                            v
+                    +-------+--------+
+                    | Project        |
+                    | Management     |
+                    +-------+--------+
+                            |
+              +-------------+-------------+
+              |             |             |
+              v             v             v
+      +-------+---+  +------+----+  +----+------+
+      | D1 Database|  | KV Storage |  | File     |
+      | (Metadata) |  | (Projects) |  | Storage  |
+      +-----------+|  +-----------+|  +---------+|
+                   |               |             |
+                   v               v             v
+           +-------+---------------+-------------+-----+
+           |           Deployment Process             |
+           +------------------+----------------------+|
+                              |
+          +------------------+v--------------------+
+          |                  |                     |
+          v                  v                     v
+  +-------+-------+  +-------+--------+    +-------+-------+
+  | Netlify       |  | Cloudflare     |    | Local ZIP     |
+  | Deployment    |  | Pages          |    | Generation    |
+  +---------------+  +----------------+    +---------------+
+```
+
+## 7. Deployment Architectures
+
+Pom-Bolt supports multiple deployment architectures:
+
+1. **Cloudflare Pages Deployment**
+   - Uses Cloudflare Pages for hosting
+   - Leverages Cloudflare D1 for database
+   - Uses KV storage for project files and caching
+   - Most suitable for production deployments
+
+2. **Netlify Deployment (Default)**
+   - Creates Netlify sites for projects
+   - Uses Netlify API for deployment
+   - Requires Netlify Personal Access Token
+   - Prioritized in the deployment manager
+
+3. **Local ZIP Deployment (Fallback)**
+   - Generates downloadable ZIP packages
+   - No external hosting
+   - Always available as fallback
+   - Used when other deployment options aren't available
+
+4. **Docker Deployment**
+   - Container-based deployment
+   - Supports both development and production environments
+   - Configurable via docker-compose.yaml
+   - Can be deployed to any container orchestration platform
+   - Supports containerized VMs
+
+## 8. Key Components
+
+1. **Chat Component**
+   - Handles AI interactions
+   - Manages message history
+   - Supports file and image uploads
+   - Integrates with multiple AI models and providers
+
+2. **Project Management**
+   - Creates and manages projects
+   - Handles file operations
+   - Synchronizes project state
+   - Persists metadata in D1 database
+
+3. **Deployment System**
+   - Manages multiple deployment targets
+   - Handles credentials
+   - Provides fallback mechanisms
+   - Tracks deployment status
+
+4. **Storage Infrastructure**
+   - D1 Database for project metadata
+   - KV Storage for project files
+   - Cache system for performance optimization
+
+The application is built using modern web technologies:
+- React for the frontend components
+- Remix for server-side rendering and routing
+- TypeScript for type safety
+- Cloudflare Workers for serverless functionality
+- Vite for fast development and optimized builds
+
+This modular architecture allows for extensibility and ensures that the application can adapt to different deployment environments while maintaining a consistent user experience.

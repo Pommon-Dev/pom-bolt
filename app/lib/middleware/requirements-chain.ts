@@ -11,7 +11,10 @@ import { getProjectStateManager } from '~/lib/projects';
 import { handleProjectContext } from './project-context';
 import type { ProjectRequestContext } from './project-context';
 import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
-import type { DeploymentResult } from '~/lib/deployment/types';
+import type { 
+  DeploymentResult, 
+  ProjectMetadata
+} from '~/lib/deployment/types';
 import { getCloudflareCredentials, getNetlifyCredentials, getGitHubCredentials } from '~/lib/deployment/credentials';
 import type { ActionFunctionArgs } from '@remix-run/cloudflare';
 
@@ -189,12 +192,22 @@ export async function loadProjectContext(
     
     // Use the project context middleware to handle the request
     // This will set isNewProject, projectId, and project on the context
-    const projectContext = await handleProjectContext(request);
+    // Pass the already parsed body to avoid re-parsing the request
+    const parsedBody = {
+      projectId: context.projectId,
+      content: context.content,
+      userId: context.userId
+    };
+    const projectContext = await handleProjectContext(request, {}, parsedBody);
     
     // Add the project context to the requirements context
     context.isNewProject = context.additionalRequirement ? false : projectContext.isNewProject;
     context.projectId = projectContext.projectId;
-    context.project = projectContext.project;
+    
+    // Handle project state with proper type safety
+    if (projectContext.project) {
+      context.project = projectContext.project;
+    }
     
     // Double check project existence when additionalRequirement is true
     if (context.additionalRequirement && context.projectId) {
@@ -206,17 +219,31 @@ export async function loadProjectContext(
         throw new Error(`Project ${context.projectId} not found. Cannot add features to non-existent project.`);
       }
       
+      if (!context.project) {
+        const project = await projectManager.getProject(context.projectId);
+        if (project) {
+          context.project = project;
+        } else {
+          logger.warn(`Failed to load project ${context.projectId}, but will continue processing`);
+        }
+      }
+      
       logger.info(`Confirmed project ${context.projectId} exists for feature request`);
     }
     
-    // Extract Cloudflare environment if available
+    // Combine environment information
+    if (!context.env) {
+      context.env = {};
+    }
+    
+    // Extract Cloudflare environment if available from request
     if (request.cf && typeof request.cf === 'object') {
-      context.env = { ...request.cf };
-    } else if (request instanceof Request && 'context' in request && request.context) {
+      Object.assign(context.env, request.cf);
+    } else if (request instanceof Request && 'context' in request && (request as any).context) {
       // For Cloudflare Workers/Pages specific context
       const cloudflareContext = (request as any).context;
       if (cloudflareContext && cloudflareContext.cloudflare && cloudflareContext.cloudflare.env) {
-        context.env = { ...cloudflareContext.cloudflare.env };
+        Object.assign(context.env, cloudflareContext.cloudflare.env);
       }
     }
     
@@ -408,10 +435,38 @@ async function configureDeploymentManager(context: RequirementsContext): Promise
     netlifyToken = context.deploymentOptions.netlifyToken;
     logger.info('Found Netlify credentials in request body deploymentOptions.netlifyToken');
   } 
-  // Finally check environment variables
-  else if (context.env && typeof context.env.NETLIFY_AUTH_TOKEN === 'string') {
-    netlifyToken = context.env.NETLIFY_AUTH_TOKEN;
-    logger.info('Found Netlify credentials in environment');
+  // Finally check environment variables - check both possible env var names
+  else if (context.env) {
+    if (typeof context.env.NETLIFY_AUTH_TOKEN === 'string') {
+      netlifyToken = context.env.NETLIFY_AUTH_TOKEN;
+      logger.info('Found Netlify credentials in environment (NETLIFY_AUTH_TOKEN)');
+    } else if (typeof context.env.NETLIFY_API_TOKEN === 'string') {
+      netlifyToken = context.env.NETLIFY_API_TOKEN;
+      logger.info('Found Netlify credentials in environment (NETLIFY_API_TOKEN)');
+    }
+  }
+  
+  // Similarly handle GitHub credentials
+  let githubToken: string | undefined = undefined;
+  let githubOwner: string | undefined = undefined;
+  
+  // First check if credentials are provided in the deployment options
+  if (context.deploymentOptions?.githubCredentials?.token) {
+    githubToken = context.deploymentOptions.githubCredentials.token;
+    githubOwner = context.deploymentOptions.githubCredentials.owner;
+    logger.info('Found GitHub credentials in request body', { hasOwner: !!githubOwner });
+  }
+  // Then check environment variables
+  else if (context.env) {
+    if (typeof context.env.GITHUB_TOKEN === 'string') {
+      githubToken = context.env.GITHUB_TOKEN;
+      logger.info('Found GitHub token in environment (GITHUB_TOKEN)');
+    }
+    
+    if (typeof context.env.GITHUB_OWNER === 'string') {
+      githubOwner = context.env.GITHUB_OWNER;
+      logger.info('Found GitHub owner in environment (GITHUB_OWNER)');
+    }
   }
   
   // Log environment details for debugging
@@ -472,16 +527,34 @@ export async function processRequirements(
     throw new Error('Requirements content is required');
   }
   
+  logger.info('🔍 [processRequirements] Starting with context:', { 
+    projectId: context.projectId || 'new-project',
+    isNewProject: context.isNewProject,
+    contentLength: context.content.length,
+    shouldDeploy: context.shouldDeploy,
+    deploymentTarget: context.deploymentTarget,
+    hasDeploymentOptions: !!context.deploymentOptions
+  });
+  
   try {
     const projectManager = getProjectStateManager();
+    logger.debug('🔧 [processRequirements] Got project state manager');
     
     // Get cookie headers for API keys and provider settings
     const cookieHeader = request.headers.get('Cookie');
     const apiKeys = getApiKeysFromCookie(cookieHeader);
     const providerSettings = getProviderSettingsFromCookie(cookieHeader);
     
+    logger.debug('🔑 [processRequirements] Extracted API keys and provider settings:', {
+      hasApiKeys: Object.keys(apiKeys || {}).length > 0,
+      hasProviderSettings: Object.keys(providerSettings || {}).length > 0
+    });
+    
     // Handle existing project or create a new one
     if (!context.isNewProject && context.projectId) {
+      // Log existing project code path
+      logger.info('🔄 [processRequirements] Processing EXISTING project path:', { projectId: context.projectId });
+      
       // Load existing project
       logger.info(`Loading existing project: ${context.projectId}`);
       context.project = await projectManager.getProject(context.projectId);
@@ -602,10 +675,22 @@ export async function processRequirements(
       
       return context;
     } else {
-      // Create a new project
-      logger.info('Creating new project from requirements');
+      // Log new project code path
+      logger.info('🆕 [processRequirements] Processing NEW project path');
       
       // Generate code for a new project
+      logger.info('💻 [processRequirements] Generating code for new project');
+      
+      // Enhanced logging for CodegenService input
+      logger.debug('📥 [processRequirements] CodegenService input parameters:', {
+        requirementsLength: context.content.length,
+        projectId: 'new-project-' + Date.now(),
+        isNewProject: true,
+        userId: context.userId || 'anonymous',
+        hasServerEnv: !!context.env,
+        hasApiKeys: Object.keys(apiKeys || {}).length > 0
+      });
+      
       const codegenResult = await CodegenService.generateCode({
         requirements: context.content,
         projectId: 'new-project-' + Date.now(),
@@ -616,9 +701,25 @@ export async function processRequirements(
         providerSettings
       });
       
+      // Enhanced logging for CodegenService results
+      logger.info('📤 [processRequirements] Code generation completed:', {
+        filesGenerated: Object.keys(codegenResult.files).length,
+        modelUsed: codegenResult.metadata?.model || 'unknown',
+        provider: codegenResult.metadata?.provider || 'unknown'
+      });
+      
       // Create a new project
       const projectName = codegenResult.metadata?.name || 'Untitled Project';
-      logger.info('[processRequirements] Creating new project entry', { projectName });
+      logger.info('📝 [processRequirements] Creating new project entry', { projectName });
+      
+      // Log the createProject request
+      logger.debug('📋 [processRequirements] createProject parameters:', {
+        name: projectName,
+        requirementsLength: context.content.length,
+        userId: context.userId || 'anonymous',
+        hasMetadata: !!codegenResult.metadata
+      });
+      
       const newProject = await projectManager.createProject({
         name: projectName,
         initialRequirements: context.content,
@@ -665,10 +766,23 @@ export async function processRequirements(
         }
       }
         
+      // After project creation, add more logging
+      logger.info('🎉 [processRequirements] Project creation successful:', {
+        projectId: newProject?.id,
+        projectName: newProject?.name,
+        createdAt: newProject?.createdAt || Date.now()
+      });
+      
       return context;
     }
   } catch (error) {
-    logger.error('Failed to process requirements:', error);
+    logger.error('❌ [processRequirements] Failed with error:', error);
+    // Include more detailed error information
+    if (error instanceof Error) {
+      logger.error('  - Error name: ' + error.name);
+      logger.error('  - Error message: ' + error.message);
+      logger.error('  - Error stack: ' + error.stack);
+    }
     throw error;
   }
 }
@@ -756,35 +870,43 @@ function generateProjectName(requirements: string): string {
  * This is the main entry point for processing requirements
  */
 export async function runRequirementsChain(
-  request: Request
+  request: Request,
+  cloudflareContext?: any
 ): Promise<RequirementsContext> {
-  logger.info('🚀 [runRequirementsChain] Starting chain execution');
-  
   try {
-    // Parse the request to extract requirements and metadata
+    // Create initial context from request
     let context = await parseRequest(null, request);
     
+    // Log setup information
+    logger.info('🏁 [runRequirementsChain] Starting requirements chain', { 
+      requestUrl: request.url,
+      method: request.method,
+      hasContent: !!context?.content,
+      shouldDeploy: !!context?.shouldDeploy,
+      hasDeployTarget: !!context?.deploymentTarget,
+      projectId: context?.projectId,
+      hasCloudflareContext: !!cloudflareContext,
+      hasCloudflareEnv: !!cloudflareContext?.cloudflare?.env
+    });
+    
     if (!context) {
-      logger.error('❌ [runRequirementsChain] Context is null after parseRequest');
-      throw new Error('Failed to parse request');
+      logger.warn('⚠️ [runRequirementsChain] Context is null after parseRequest');
+      throw new Error('Failed to parse requirements request');
     }
     
-    // Log the parsed request data
-    logger.info('📋 [runRequirementsChain] Request parsed', { 
-      projectId: context.projectId || 'new-project', 
-      shouldDeploy: context.shouldDeploy,
-      deploymentTarget: context.deploymentTarget || 'auto',
-      hasGithubCreds: !!context.deploymentOptions?.githubCredentials,
-      hasNetlifyCreds: !!context.deploymentOptions?.netlifyCredentials,
-      setupGitHub: !!context.deploymentOptions?.setupGitHub
-    });
+    // Add Cloudflare context to the requirements context if available
+    if (cloudflareContext) {
+      // Store the environment in the context for use by other middleware
+      context.env = cloudflareContext.cloudflare?.env || cloudflareContext.env || {};
+      logger.debug('📝 [runRequirementsChain] Added Cloudflare environment to context', {
+        envKeys: context.env ? Object.keys(context.env) : []
+      });
+    } else {
+      logger.warn('⚠️ [runRequirementsChain] No Cloudflare context provided, environment variables may be unavailable');
+    }
     
-    // Load project context
+    // Load project context if needed
     context = await loadProjectContext(context, request);
-    logger.info('📂 [runRequirementsChain] Project context loaded', { 
-      projectId: context.projectId, 
-      isNew: context.isNewProject 
-    });
     
     // Process requirements and generate code/project
     logger.info('⚙️ [runRequirementsChain] Calling processRequirements...');
@@ -792,44 +914,39 @@ export async function runRequirementsChain(
     logger.info('✅ [runRequirementsChain] Returned from processRequirements', { 
       projectId: context.projectId, 
       filesGenerated: Object.keys(context.files || {}).length, 
-      archiveKey: context.archiveKey 
+      archiveKey: context.archiveKey || 'not-set'
     });
     
-    // Deploy code if requested
+    // Call the deployCode function if deployment is requested
     if (context.shouldDeploy) {
-      logger.info('🚀 [runRequirementsChain] shouldDeploy=true, calling deployCode...', {
-        deploymentTarget: context.deploymentTarget || 'auto',
-        options: Object.keys(context.deploymentOptions || {}).join(',')
-      });
-      
-      // Ensure any deploymentOptions are properly set
-      const deployOptionsCheck = context.deploymentOptions || {};
-      logger.debug('🔍 [runRequirementsChain] Deployment options:', {
-        hasGithubCreds: !!deployOptionsCheck.githubCredentials,
-        hasNetlifyCreds: !!deployOptionsCheck.netlifyCredentials,
-        setupGitHub: !!deployOptionsCheck.setupGitHub
-      });
-      
+      logger.info('⏩ [runRequirementsChain] Calling deployCode function');
       try {
         context = await deployCode(context);
-        logger.info('🏁 [runRequirementsChain] Returned from deployCode', { 
-          deploymentStatus: context.deploymentResult?.status,
-          deploymentUrl: context.deploymentResult?.url 
-        });
       } catch (deployError) {
-        logger.error('❌ [runRequirementsChain] Error in deployCode:', deployError);
+        logger.error('❌ [runRequirementsChain] Error in deployCode function:', deployError);
+        // Ensure context exists and add error to it
         if (!context.error) {
           context.error = deployError instanceof Error ? deployError : new Error(String(deployError));
         }
       }
-    } else {
-      logger.info('⏩ [runRequirementsChain] shouldDeploy=false, skipping deployment');
+      logger.info('🏁 [runRequirementsChain] Returned from deployCode', { 
+        hasError: !!context.error,
+        hasDeploymentResult: !!context.deploymentResult,
+        errorMessage: context.error instanceof Error ? context.error.message : undefined
+      });
     }
     
-    logger.info('🎉 [runRequirementsChain] Chain execution finished successfully');
+    logger.info('🎉 [runRequirementsChain] Chain execution finished successfully', {
+      projectId: context.projectId,
+      shouldDeploy: context.shouldDeploy,
+      hasError: !!context.error,
+      errorMessage: context.error instanceof Error ? context.error.message : undefined
+    });
+    
     return context;
   } catch (error) {
-    logger.error('❌ [runRequirementsChain] Error during chain execution:', error);
+    logger.error('❌ [runRequirementsChain] Error in requirements chain:', error);
+    
     // Create a minimal context with error information
     const errorContext: RequirementsContext = {
       content: '',
@@ -849,36 +966,94 @@ export async function runRequirementsChain(
 export async function deployCode(context: RequirementsContext): Promise<RequirementsContext> {
   logger.info('🚀 [deployCode] Starting deployment process', {
     projectId: context.projectId,
-    projectName: context.project?.name,
-    filesCount: context.files ? Object.keys(context.files).length : 0,
-    deploymentTarget: context.deploymentTarget || 'auto'
+    shouldDeploy: context.shouldDeploy,
+    requestedTarget: context.deploymentTarget,
+    hasEnv: !!context.env,
+    envKeys: context.env ? Object.keys(context.env).filter(key => 
+      !key.includes('KEY') && !key.includes('TOKEN')).join(',') : 'none'
   });
-
+  
+  // Skip deployment if not requested
+  if (!context.shouldDeploy) {
+    logger.info('[deployCode] Deployment not requested, skipping');
+    return context;
+  }
+  
   try {
-    // Check if we have files to deploy
-    if (!context.files || Object.keys(context.files).length === 0) {
-      logger.warn('⚠️ [deployCode] No files to deploy, aborting');
-      return context;
+    // Get deployment options from context
+    const env = context.env || {};
+    const deploymentOptions = context.deploymentOptions || {};
+    
+    logger.debug('🔍 [deployCode] Deployment options:', {
+      hasDeploymentOptions: Object.keys(deploymentOptions).length > 0,
+      requestedTarget: context.deploymentTarget,
+      netlifyCredentials: !!deploymentOptions.netlifyCredentials,
+      githubCredentials: !!deploymentOptions.githubCredentials,
+      setupGitHub: !!deploymentOptions.setupGitHub,
+      hasOpenAIKey: !!env.OPENAI_API_KEY,
+      hasGithubToken: !!env.GITHUB_TOKEN,
+      hasNetlifyToken: !!(env.NETLIFY_API_TOKEN || env.NETLIFY_AUTH_TOKEN)
+    });
+    
+    // Load project files
+    const manager = getProjectStateManager();
+    const project = await manager.getProject(context.projectId);
+    if (!project) {
+      logger.error(`❌ [deployCode] Project ${context.projectId} not found`);
+      throw new Error(`Project ${context.projectId} not found`);
     }
+    
+    const projectFiles = await manager.getProjectFiles(context.projectId);
+    if (!projectFiles || projectFiles.length === 0) {
+      logger.error(`❌ [deployCode] No files found for project ${context.projectId}`);
+      throw new Error(`No files found for project ${context.projectId}`);
+    }
+    
+    // Map project files to DeploymentFiles format
+    const files = projectFiles.reduce((map, file) => {
+      if (!file.isDeleted) {
+        map[file.path] = file.content;
+      }
+      return map;
+    }, {} as Record<string, string>);
+    
+    logger.info('✅ [deployCode] Project files loaded', { 
+      fileCount: Object.keys(files).length 
+    });
     
     // Import the DeploymentWorkflowService
     const { getDeploymentWorkflowService } = await import('~/lib/deployment/deployment-workflow');
     const deploymentWorkflowService = getDeploymentWorkflowService();
     
-    // Extract credentials from context and deployment options
-    const deploymentOptions = context.deploymentOptions || {};
-    const env = context.env || {};
+    // Configure credentials
+    const credentials: Record<string, any> = {};
+    const netlifyCredentials = getNetlifyCredentials({ env });
     
-    // Log deployment options
-    logger.debug('🔍 [deployCode] Deployment options:', { 
-      keys: Object.keys(deploymentOptions),
-      hasGithubCreds: !!deploymentOptions.githubCredentials,
-      hasNetlifyCreds: !!deploymentOptions.netlifyCredentials,
-      setupGitHub: !!deploymentOptions.setupGitHub
+    logger.debug('[deployCode] Deployment credentials check:', { 
+      netlify: {
+        hasApiToken: !!netlifyCredentials.apiToken,
+        tokenLength: netlifyCredentials.apiToken ? netlifyCredentials.apiToken.length : 0
+      },
+      deploymentOptions: {
+        hasNetlifyCreds: !!deploymentOptions.netlifyCredentials,
+        hasNetlifyApiToken: !!deploymentOptions.netlifyCredentials?.apiToken,
+        hasGithubCreds: !!deploymentOptions.githubCredentials,
+        hasGithubToken: !!deploymentOptions.githubCredentials?.token,
+        hasGithubOwner: !!deploymentOptions.githubCredentials?.owner,
+        setupGitHub: !!deploymentOptions.setupGitHub
+      },
+      targetRequested: context.deploymentTarget
     });
     
-    // Set up credentials object for the workflow service
-    const credentials: any = {};
+    if (netlifyCredentials.apiToken) {
+      logger.debug('[deployCode] Using Netlify credentials from environment');
+      credentials.netlify = {
+        apiToken: netlifyCredentials.apiToken
+      };
+    } else if (deploymentOptions.netlifyCredentials) {
+      logger.debug('[deployCode] Using Netlify credentials from request');
+      credentials.netlify = deploymentOptions.netlifyCredentials;
+    }
     
     // Cloudflare credentials
     const cfCreds = getCloudflareCredentials({ env });
@@ -888,18 +1063,6 @@ export async function deployCode(context: RequirementsContext): Promise<Requirem
     } else if (deploymentOptions.cfCredentials) {
       logger.debug('[deployCode] Using Cloudflare credentials from request');
       credentials.cloudflare = deploymentOptions.cfCredentials;
-    }
-    
-    // Netlify credentials
-    const netlifyCredentials = getNetlifyCredentials({ env });
-    if (netlifyCredentials.apiToken) {
-      logger.debug('[deployCode] Using Netlify credentials from environment');
-      credentials.netlify = {
-        apiToken: netlifyCredentials.apiToken
-      };
-    } else if (deploymentOptions.netlifyCredentials) {
-      logger.debug('[deployCode] Using Netlify credentials from request');
-      credentials.netlify = deploymentOptions.netlifyCredentials;
     }
     
     // GitHub credentials
@@ -951,14 +1114,14 @@ export async function deployCode(context: RequirementsContext): Promise<Requirem
     // Deploy the project using the workflow service
     const deployment = await deploymentWorkflowService.deployProject({
       projectId: context.projectId,
-      projectName: context.project?.name || 'Generated Project',
-      files: context.files,
+      projectName: project.name || 'Generated Project',
+      files: files,
       targetName: context.deploymentTarget,
       setupGitHub,
       credentials,
       metadata: {
         ...deploymentOptions,
-        environment: context.env
+        environment: env
       }
     });
     

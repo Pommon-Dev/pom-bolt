@@ -66,6 +66,17 @@ export function loadCloudflareCredentials(): Partial<CloudflareConfig> {
  * Extract Cloudflare credentials from context or environment
  */
 export function getCloudflareCredentials(context: any = {}): { accountId?: string; apiToken?: string; projectName?: string } {
+  // Log the context structure for debugging
+  logger.debug('Cloudflare credentials context structure:', {
+    contextType: typeof context,
+    hasCloudflare: !!context.cloudflare,
+    hasCloudflarEnv: !!context.cloudflare?.env,
+    hasDirectEnv: !!context.env,
+    envKeys: context.env ? Object.keys(context.env).join(',') : 'none',
+    cfEnvKeys: context.cloudflare?.env ? Object.keys(context.cloudflare.env).join(',') : 'none'
+  });
+  
+  // Try multiple paths to find the environment variables
   const env = context.cloudflare?.env || context.env || {};
   
   const accountId = typeof env.CLOUDFLARE_ACCOUNT_ID === 'string' ? env.CLOUDFLARE_ACCOUNT_ID : undefined;
@@ -75,6 +86,10 @@ export function getCloudflareCredentials(context: any = {}): { accountId?: strin
     hasAccountId: !!accountId,
     hasApiToken: !!apiToken
   });
+  
+  if (!accountId || !apiToken) {
+    logger.warn('Missing Cloudflare credentials. Check that CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are set in Cloudflare Pages environment variables.');
+  }
   
   return {
     accountId,
@@ -87,13 +102,36 @@ export function getCloudflareCredentials(context: any = {}): { accountId?: strin
  * Extract Netlify credentials from context or environment
  */
 export function getNetlifyCredentials(context: any = {}): { apiToken?: string } {
+  // Log the context structure for debugging
+  logger.debug('Netlify credentials context structure:', {
+    contextType: typeof context,
+    hasCloudflare: !!context.cloudflare,
+    hasCloudflarEnv: !!context.cloudflare?.env,
+    hasDirectEnv: !!context.env,
+    envKeys: context.env ? Object.keys(context.env).join(',') : 'none',
+    cfEnvKeys: context.cloudflare?.env ? Object.keys(context.cloudflare.env).join(',') : 'none'
+  });
+  
+  // Try multiple paths to find the environment variables
   const env = context.cloudflare?.env || context.env || {};
   
-  const apiToken = typeof env.NETLIFY_API_TOKEN === 'string' ? env.NETLIFY_API_TOKEN : undefined;
+  // Check for both possible environment variable names
+  const apiToken = typeof env.NETLIFY_API_TOKEN === 'string' ? env.NETLIFY_API_TOKEN : 
+                  typeof env.NETLIFY_AUTH_TOKEN === 'string' ? env.NETLIFY_AUTH_TOKEN : 
+                  undefined;
   
   logger.debug('Netlify credentials status:', { 
-    hasApiToken: !!apiToken
+    hasApiToken: !!apiToken,
+    checkedEnvVars: ['NETLIFY_API_TOKEN', 'NETLIFY_AUTH_TOKEN'],
+    tokenSource: apiToken ? 
+      (typeof env.NETLIFY_API_TOKEN === 'string' ? 'NETLIFY_API_TOKEN' : 
+       typeof env.NETLIFY_AUTH_TOKEN === 'string' ? 'NETLIFY_AUTH_TOKEN' : 
+       'unknown') : 'none'
   });
+  
+  if (!apiToken) {
+    logger.warn('Missing Netlify credentials. Check that NETLIFY_API_TOKEN or NETLIFY_AUTH_TOKEN is set in Cloudflare Pages environment variables.');
+  }
   
   return {
     apiToken
@@ -104,6 +142,17 @@ export function getNetlifyCredentials(context: any = {}): { apiToken?: string } 
  * Extract GitHub credentials from context or environment
  */
 export function getGitHubCredentials(context: any = {}): { token?: string; owner?: string } {
+  // Log the context structure for debugging
+  logger.debug('GitHub credentials context structure:', {
+    contextType: typeof context,
+    hasCloudflare: !!context.cloudflare,
+    hasCloudflarEnv: !!context.cloudflare?.env,
+    hasDirectEnv: !!context.env,
+    envKeys: context.env ? Object.keys(context.env).join(',') : 'none',
+    cfEnvKeys: context.cloudflare?.env ? Object.keys(context.cloudflare.env).join(',') : 'none'
+  });
+  
+  // Try multiple paths to find the environment variables
   const env = context.cloudflare?.env || context.env || {};
   
   const token = typeof env.GITHUB_TOKEN === 'string' ? env.GITHUB_TOKEN : undefined;
@@ -113,6 +162,10 @@ export function getGitHubCredentials(context: any = {}): { token?: string; owner
     hasToken: !!token,
     hasOwner: !!owner
   });
+  
+  if (!token) {
+    logger.warn('Missing GitHub credentials. Check that GITHUB_TOKEN is set in Cloudflare Pages environment variables.');
+  }
   
   return {
     token,

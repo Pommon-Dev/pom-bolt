@@ -1,34 +1,102 @@
-import getEnvironment, { StorageType } from '~/lib/environments';
+import { createCloudflareEnvironment } from './environments/cloudflare-environment';
+import { createMemoryEnvironment } from './environments/memory-environment';
+import { createClientEnvironment } from './environments/client-environment';
+import type { EnvironmentManager } from './environments';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('environment-setup');
 
-// Initialize environment but don't set it yet - each request will get its own context
-let env = getEnvironment();
-logger.info(`Application initialized with environment: ${env.getInfo().type}`);
+// Singleton
+export let environment: EnvironmentManager;
 
-/**
- * Initialize environment with context from a request
- * This should be called in route loaders to ensure the environment has access
- * to the request context
- */
-export function initEnvironmentWithContext(context: any): void {
-  env = getEnvironment(context);
-  logger.debug(`Environment initialized with context, type: ${env.getInfo().type}`);
+export function getEnvironmentInfo() {
+  if (!environment) {
+    logger.warn('Environment not initialized yet');
+    return null;
+  }
+  
+  return {
+    type: environment.getEnvironmentType(),
+    isProduction: environment.isProduction(),
+    isClient: environment.isClient()
+  };
+}
+
+export function initEnvironmentWithContext(context?: any) {
+  if (environment) {
+    logger.debug('Environment already initialized');
+    return environment;
+  }
+
+  logger.info('Initializing environment', {
+    context: context ? 'provided' : 'not provided',
+    isClient: typeof window !== 'undefined'
+  });
+
+  // Server-side (Cloudflare Workers environment)
+  if (typeof window === 'undefined') {
+    if (context?.cloudflare?.env) {
+      const { env } = context.cloudflare;
+      
+      // Log available bindings
+      logger.info('Cloudflare environment bindings available:', {
+        DB: !!env.DB,
+        POM_BOLT_PROJECTS: !!env.POM_BOLT_PROJECTS,
+        POM_BOLT_FILES: !!env.POM_BOLT_FILES,
+        POM_BOLT_CACHE: !!env.POM_BOLT_CACHE,
+      });
+      
+      if (env.DB && env.POM_BOLT_PROJECTS) {
+        logger.info('Creating Cloudflare environment with database and KV bindings');
+        environment = createCloudflareEnvironment(env);
+      } else {
+        logger.warn('Missing required bindings, creating memory environment', {
+          missingDB: !env.DB,
+          missingProjects: !env.POM_BOLT_PROJECTS
+        });
+        environment = createMemoryEnvironment();
+      }
+    } else {
+      logger.warn('No Cloudflare context provided, creating memory environment');
+      environment = createMemoryEnvironment();
+    }
+  } 
+  // Client-side
+  else {
+    logger.info('Creating client environment');
+    environment = createClientEnvironment();
+  }
+
+  return environment;
+}
+
+export function getEnvironment(): EnvironmentManager {
+  if (!environment) {
+    logger.warn('Environment not initialized yet, initializing with defaults');
+    initEnvironmentWithContext();
+  }
+  
+  return environment;
+}
+
+// For testing and debugging
+export function resetEnvironment() {
+  logger.info('Resetting environment');
+  environment = undefined as any;
 }
 
 /**
  * Helper to get environment variables with proper typing
  */
 export function getEnv<T = string>(key: string, defaultValue?: T): T | undefined {
-  return env.getEnvVariable<T>(key, defaultValue);
+  return environment.getEnvVariable<T>(key, defaultValue);
 }
 
 /**
  * Helper to check if an environment variable exists
  */
 export function hasEnv(key: string): boolean {
-  return env.hasEnvVariable(key);
+  return environment.hasEnvVariable(key);
 }
 
 /**
@@ -36,7 +104,7 @@ export function hasEnv(key: string): boolean {
  * Prioritizes persistent storage types when available
  */
 export function getBestStorageType(): StorageType {
-  const availableTypes = env.getAvailableStorageTypes();
+  const availableTypes = environment.getAvailableStorageTypes();
 
   // Preferred storage types in order
   const preferredTypes = [
@@ -66,7 +134,7 @@ export async function storeValue<T>(key: string, value: T): Promise<void> {
   logger.debug(`Storing value with key "${key}" using storage type: ${storageType}`);
 
   try {
-    await env.storeValue<T>(storageType, key, value);
+    await environment.storeValue<T>(storageType, key, value);
   } catch (error) {
     logger.error(`Failed to store value with key "${key}": ${error}`);
     throw error;
@@ -81,7 +149,7 @@ export async function retrieveValue<T>(key: string): Promise<T | null> {
   logger.debug(`Retrieving value with key "${key}" using storage type: ${storageType}`);
 
   try {
-    return await env.retrieveValue<T>(storageType, key);
+    return await environment.retrieveValue<T>(storageType, key);
   } catch (error) {
     logger.error(`Failed to retrieve value with key "${key}": ${error}`);
     throw error;
@@ -96,7 +164,7 @@ export async function removeValue(key: string): Promise<void> {
   logger.debug(`Removing value with key "${key}" using storage type: ${storageType}`);
 
   try {
-    await env.removeValue(storageType, key);
+    await environment.removeValue(storageType, key);
   } catch (error) {
     logger.error(`Failed to remove value with key "${key}": ${error}`);
     throw error;
@@ -107,15 +175,8 @@ export async function removeValue(key: string): Promise<void> {
  * Generate a unique ID using the environment's implementation
  */
 export function generateUniqueId(): string {
-  return env.createUniqueId();
-}
-
-/**
- * Get information about the current environment
- */
-export function getEnvironmentInfo() {
-  return env.getInfo();
+  return environment.createUniqueId();
 }
 
 // Export the environment instance for advanced use cases
-export const environment = env;
+export const environmentInstance = environment;

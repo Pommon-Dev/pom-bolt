@@ -48,38 +48,18 @@ export class CodegenService {
         projectId, 
         isNewProject, 
         requirementsLength: requirements.length,
-        existingFilesCount: Object.keys(existingFiles).length
+        existingFilesCount: Object.keys(existingFiles).length,
+        hasServerEnv: !!serverEnv,
+        hasApiKeys: !!apiKeys
       });
 
-      // --- BEGIN ADDED LOGGING ---
-      try {
-        logger.debug('[CodegenService] Received serverEnv - inspecting content:', {
-          hasServerEnv: !!serverEnv,
-          serverEnvType: typeof serverEnv,
-          serverEnvKeys: serverEnv ? Object.keys(serverEnv).join(',') : 'N/A',
-          hasOpenAiKey: serverEnv?.OPENAI_API_KEY !== undefined,
-          hasOpenAiModel: serverEnv?.OPENAI_DEFAULT_MODEL !== undefined,
-          hasPomBoltProjects: serverEnv?.POM_BOLT_PROJECTS !== undefined,
-          // Also check nested structure common in Cloudflare
-          hasNestedEnv: !!(serverEnv as any)?.env,
-          nestedEnvKeys: (serverEnv as any)?.env ? Object.keys((serverEnv as any).env).join(',') : 'N/A',
-          hasNestedOpenAiKey: (serverEnv as any)?.env?.OPENAI_API_KEY !== undefined,
-          hasNestedPomBoltProjects: (serverEnv as any)?.env?.POM_BOLT_PROJECTS !== undefined,
-        });
-      } catch (e: any) {
-         logger.error('[CodegenService] Error inspecting serverEnv:', e.message);
-      }
-      // --- END ADDED LOGGING ---
-
-      logger.debug('Environment details for code generation:', {
-        hasServerEnv: !!serverEnv,
-        envType: typeof serverEnv,
-        hasApiKeys: !!apiKeys,
-        hasProviderSettings: !!providerSettings,
-        isCloudflareEnv: serverEnv && (
-          (serverEnv as any).CF_PAGES === '1' || 
-          (serverEnv as any).env?.CF_PAGES === '1'
-        )
+      // Debug environment structure
+      logger.debug('Environment structure for LLM:', {
+        serverEnvType: typeof serverEnv,
+        hasOpenAiKey: !!serverEnv?.OPENAI_API_KEY,
+        hasCloudflareEnv: !!serverEnv?.cloudflare?.env,
+        hasCfOpenAiKey: !!serverEnv?.cloudflare?.env?.OPENAI_API_KEY,
+        apiKeysProvided: apiKeys ? Object.keys(apiKeys).join(',') : 'none'
       });
 
       // Create context for the LLM
@@ -96,10 +76,15 @@ export class CodegenService {
         // Get the LLM manager
         const llmManager = LLMManager.getInstance();
         
-        // Ensure LLM manager has access to environment variables
-        if (serverEnv) {
-          llmManager.setEnv(serverEnv);
-          logger.debug('Set environment variables in LLM manager');
+        // CRITICAL FIX: Ensure LLM manager has access to environment variables
+        // Extract environment from all possible places in the Cloudflare context
+        const normalizedEnv = this.normalizeEnvironment(serverEnv);
+        if (normalizedEnv) {
+          llmManager.setEnv(normalizedEnv);
+          logger.debug('Set normalized environment variables in LLM manager', {
+            envKeys: Object.keys(normalizedEnv).filter(key => 
+              !key.includes('KEY') && !key.includes('TOKEN')).join(',')
+          });
         }
         
         let modelInstance: any;
@@ -111,10 +96,16 @@ export class CodegenService {
           
           // First check if we have models available
           if (models && models.length > 0) {
+            // Log available models for debugging
+            logger.info('Available LLM models:', {
+              modelCount: models.length,
+              modelNames: models.map(m => `${m.provider}:${m.name}`).join(',')
+            });
+            
             // Get the default preferred provider from environment variables
             // For Cloudflare, prioritize OpenAI since that's what we have configured
-            const preferredProvider = serverEnv?.DEFAULT_LLM_PROVIDER || 'openai';
-            const preferredModel = serverEnv?.DEFAULT_LLM_MODEL || 'gpt-4o-mini';
+            const preferredProvider = normalizedEnv?.DEFAULT_LLM_PROVIDER || 'openai';
+            const preferredModel = normalizedEnv?.DEFAULT_LLM_MODEL || 'gpt-4o';
             
             logger.debug(`Looking for preferred provider: ${preferredProvider}, model: ${preferredModel}`);
             
@@ -158,23 +149,19 @@ export class CodegenService {
               const provider = llmManager.getProvider(modelInfo.provider);
               if (provider) {
                 try {
-                  // Add direct API key mapping for OpenAI if it exists in the environment
-                  // This ensures we handle Cloudflare environment properly
-                  let updatedApiKeys = apiKeys || {};
-                  
-                  // For Cloudflare environment with OpenAI key, add it directly to apiKeys
-                  if (serverEnv?.OPENAI_API_KEY && provider.name === 'OpenAI') {
-                    updatedApiKeys = { 
-                      ...updatedApiKeys, 
-                      OpenAI: serverEnv.OPENAI_API_KEY 
-                    };
-                    logger.debug('Added OPENAI_API_KEY directly from environment to apiKeys');
-                  }
+                  // Create a merged API keys object with all possible sources
+                  const mergedApiKeys = this.mergeApiKeys(normalizedEnv, apiKeys);
+
+                  logger.debug('API key status for provider:', {
+                    provider: provider.name,
+                    hasApiKey: !!mergedApiKeys[provider.name],
+                    apiKeyLength: mergedApiKeys[provider.name] ? mergedApiKeys[provider.name].length : 0
+                  });
                   
                   modelInstance = provider.getModelInstance({
                     model: modelInfo.name,
-                    serverEnv: serverEnv as any,
-                    apiKeys: updatedApiKeys,
+                    serverEnv: normalizedEnv,
+                    apiKeys: mergedApiKeys,
                     providerSettings
                   });
                   
@@ -198,7 +185,7 @@ export class CodegenService {
                   }
                 } catch (error) {
                   logger.error('Error during model instance creation or text generation:', error);
-                  // Continue to fallback
+                  throw error;
                 }
               }
             }
@@ -524,5 +511,63 @@ This is a basic React application created as a sample project.
    \`\`\`
 \`\`\`
 `;
+  }
+
+  /**
+   * Helper to normalize environment variables from different context structures
+   */
+  private static normalizeEnvironment(env: any): any {
+    if (!env) return undefined;
+    
+    const normalized: Record<string, any> = {};
+    
+    // Handle direct environment
+    if (typeof env === 'object') {
+      Object.assign(normalized, env);
+      
+      // Handle Cloudflare context structure
+      if (env.cloudflare?.env) {
+        Object.assign(normalized, env.cloudflare.env);
+      }
+      
+      // Handle nested env property
+      if (env.env) {
+        Object.assign(normalized, env.env);
+      }
+    }
+    
+    return normalized;
+  }
+
+  /**
+   * Helper to merge API keys from all sources
+   */
+  private static mergeApiKeys(env: any, apiKeys: Record<string, string> | undefined): Record<string, string> {
+    const merged: Record<string, string> = {};
+    
+    // Add API keys from direct parameter
+    if (apiKeys) {
+      Object.assign(merged, apiKeys);
+    }
+    
+    // Add OpenAI API key if available in environment
+    if (env?.OPENAI_API_KEY) {
+      merged.OpenAI = env.OPENAI_API_KEY;
+    }
+    
+    // Add other provider API keys
+    if (env?.ANTHROPIC_API_KEY) {
+      merged.Anthropic = env.ANTHROPIC_API_KEY;
+    }
+    
+    if (env?.GROQ_API_KEY) {
+      merged.Groq = env.GROQ_API_KEY;
+    }
+    
+    if (env?.TOGETHER_API_KEY) {
+      merged.Together = env.TOGETHER_API_KEY;
+    }
+    
+    return merged;
   }
 } 
