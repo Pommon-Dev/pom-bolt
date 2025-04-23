@@ -38,7 +38,7 @@ curl -X POST https://23d4935a.pom-bolt.pages.dev/api/deploy \
     "projectId": "1a337717-d9eb-42a1-b6f1-bde04da47420",
     "targetName": "netlify",
     "netlifyCredentials": {
-      "apiToken": "nfp_PvdZJ7GfrLyf5ZdnogBRMHQzK1emNPZK9f7b"
+      "apiToken": ""
     }
   }'
 ```
