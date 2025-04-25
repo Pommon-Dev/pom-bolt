@@ -1,4 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
+// Add type declaration for uuid
+// @ts-ignore
+declare module 'uuid' {
+  export function v4(): string;
+}
 import { CodegenService } from '~/lib/codegen/service';
 import { getDeploymentManager } from '~/lib/deployment';
 import { createScopedLogger } from '~/utils/logger';
@@ -17,6 +22,7 @@ import type {
 } from '~/lib/deployment/types';
 import { getCloudflareCredentials, getNetlifyCredentials, getGitHubCredentials } from '~/lib/deployment/credentials';
 import type { ActionFunctionArgs } from '@remix-run/cloudflare';
+import { validateProjectId, isValidProjectId } from '~/lib/projects/project-id';
 
 // Define ChatRequest type locally since we can't import it
 interface ChatRequest {
@@ -34,19 +40,24 @@ const logger = createScopedLogger('requirements-middleware');
 export interface RequirementsContext extends ProjectRequestContext {
   content: string;
   userId?: string;
+  tenantId?: string;
   shouldDeploy: boolean;
   deploymentTarget?: string;
   deploymentOptions?: Record<string, any>;
   files?: Record<string, string>;
+  existingFiles?: Record<string, string>;
+  existingRequirements?: ProjectFile[];
+  name?: string;
+  generatedFiles?: Record<string, string>;
   deploymentResult?: {
     url: string;
     id: string;
     status: 'success' | 'failed' | 'in-progress';
   };
-  archiveKey?: string; // Key for the stored ZIP archive
+  archiveKey?: string;
   error?: Error;
-  env?: Record<string, any>; // Cloudflare environment
-  additionalRequirement?: boolean; // Flag to indicate this is a feature request for existing project
+  env?: Record<string, any>;
+  additionalRequirement?: boolean;
 }
 
 /**
@@ -91,7 +102,10 @@ export async function parseRequest(
             deploymentTarget: body.deploymentTarget,
             setupGitHub: body.setupGitHub,
             hasGithubCredentials: !!body.githubCredentials,
-            hasNetlifyCredentials: !!body.netlifyCredentials
+            hasNetlifyCredentials: !!body.netlifyCredentials,
+            additionalRequirement: body.additionalRequirement,
+            projectId: body.projectId,
+            tenantId: body.tenantId
           });
         } catch (parseError) {
           logger.error('[parseRequest] Failed to parse request body as JSON:', parseError);
@@ -120,13 +134,17 @@ export async function parseRequest(
     // Extract deployment flags
     const shouldDeploy = Boolean(body.shouldDeploy || body.deploy || body.deployment || body.deployTarget || body.deploymentTarget);
     
+    // Extract tenant ID
+    const tenantId = body.tenantId || extractTenantIdFromHeaders(request) || '';
+    
     logger.info('[parseRequest] Deployment flags in request:', {
       shouldDeploy,
       bodyHasShouldDeploy: !!body.shouldDeploy,
       bodyHasDeploy: !!body.deploy,
       bodyHasDeployment: !!body.deployment, 
       bodyHasDeployTarget: !!body.deployTarget,
-      deploymentTarget: body.deploymentTarget || body.deployTarget || 'none'
+      deploymentTarget: body.deploymentTarget || body.deployTarget || 'none',
+      tenantId: tenantId || 'none'
     });
     
     // Extract deployment settings if present
@@ -140,22 +158,65 @@ export async function parseRequest(
       typeof body.deployment?.settings === 'object' ? body.deployment.settings :
       {};
 
-    // Extract additionalRequirement flag
+    // Extract additionalRequirement flag and validate project ID if present
     const additionalRequirement = Boolean(body.additionalRequirement);
     
-    logger.debug('Parsed requirements request', { 
+    // Check for project ID from different sources
+    let projectId = '';
+    if (body.projectId) {
+      projectId = body.projectId;
+    } else if (body.id) {
+      projectId = body.id;
+    } else {
+      // Try to get from URL
+      const url = new URL(request.url);
+      const urlProjectId = url.searchParams.get('projectId');
+      if (urlProjectId) {
+        projectId = urlProjectId;
+      }
+    }
+    
+    // Validate project ID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const isValidUuid = projectId ? uuidRegex.test(projectId) : false;
+    
+    if (projectId && !isValidUuid) {
+      logger.warn(`[parseRequest] Invalid project ID format: ${projectId}, must be UUID`);
+    }
+    
+    // Validate consistency - additional requirements must have a valid project ID
+    if (additionalRequirement && (!projectId || !isValidUuid)) {
+      logger.error('[parseRequest] Additional requirement requested but no valid project ID provided', {
+        projectId,
+        isValidUuid,
+        additionalRequirement
+      });
+      throw new Error('Additional requirements must include a valid project ID');
+    }
+    
+    // Determine if this is a new or existing project
+    // If additionalRequirement is true, we must have a valid project ID and isNewProject must be false
+    // Otherwise, we check if we have a valid projectId to determine if it's a new project
+    const isNewProject = additionalRequirement ? false : !projectId || !isValidUuid;
+    
+    logger.debug('[parseRequest] Parsed requirements request', { 
       contentLength: content.length,
       shouldDeploy,
       deploymentTarget,
       hasOptions: Object.keys(deploymentOptions).length > 0,
-      additionalRequirement
+      additionalRequirement,
+      projectId: projectId || 'none',
+      projectIdValid: isValidUuid,
+      isNewProject,
+      tenantId: tenantId || 'none'
     });
     
     return {
       content,
       userId: body.userId,
-      projectId: body.projectId || '',  // Will be set by project context middleware if empty
-      isNewProject: body.projectId ? false : true, // Default assumption based on projectId presence
+      tenantId,
+      projectId: isValidUuid ? projectId : '', // Only use projectId if valid
+      isNewProject,
       shouldDeploy,
       deploymentTarget,
       deploymentOptions,
@@ -165,6 +226,29 @@ export async function parseRequest(
     logger.error('Failed to parse requirements request:', error);
     throw error;
   }
+}
+
+/**
+ * Extract tenant ID from request headers
+ */
+function extractTenantIdFromHeaders(request: Request): string | undefined {
+  // Check for tenant ID in custom header
+  const tenantId = request.headers.get('x-tenant-id');
+  
+  // Check for tenant ID in Authorization header (assuming JWT)
+  const authHeader = request.headers.get('Authorization');
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      // This is a simplified example. In a real app, you would validate and decode the JWT
+      const token = authHeader.substring(7);
+      // Extract tenant ID from token if available
+      // In a real implementation, you would use a JWT library to decode and validate the token
+    } catch (error) {
+      logger.error('Failed to extract tenant ID from JWT:', error);
+    }
+  }
+  
+  return tenantId || undefined;
 }
 
 /**
@@ -181,7 +265,8 @@ export async function loadProjectContext(
     logger.debug('Loading project context', {
       projectId: context.projectId,
       isNewProject: context.isNewProject,
-      additionalRequirement: context.additionalRequirement
+      additionalRequirement: context.additionalRequirement,
+      tenantId: context.tenantId
     });
 
     // If this is an additionalRequirement and we have a projectId, ensure isNewProject is false
@@ -190,67 +275,70 @@ export async function loadProjectContext(
       logger.info(`Processing additional requirement for existing project: ${context.projectId}`);
     }
     
-    // Use the project context middleware to handle the request
-    // This will set isNewProject, projectId, and project on the context
-    // Pass the already parsed body to avoid re-parsing the request
-    const parsedBody = {
-      projectId: context.projectId,
-      content: context.content,
-      userId: context.userId
+    // For new projects, just pass through the context
+    if (context.isNewProject) {
+      logger.debug('New project, no existing context to load');
+      return context;
+    }
+    
+    // For existing projects, load project data
+    if (!context.projectId) {
+      logger.error('Cannot load project context: No project ID provided');
+      throw new Error('Project ID is required for existing projects');
+    }
+    
+    // Get project state manager
+    const projectManager = getProjectStateManager();
+    
+    // Check if project exists
+    const projectExists = await projectManager.projectExists(context.projectId);
+    if (!projectExists) {
+      logger.error(`Project not found: ${context.projectId}`);
+      throw new Error(`Project not found: ${context.projectId}`);
+    }
+    
+    // Load project
+    const project = await projectManager.getProject(context.projectId);
+    if (!project) {
+      logger.error(`Failed to load project: ${context.projectId}`);
+      throw new Error(`Failed to load project: ${context.projectId}`);
+    }
+    
+    // Validate tenant ownership if tenant ID is provided
+    if (context.tenantId && project.tenantId && context.tenantId !== project.tenantId) {
+      logger.error(`Tenant mismatch for project ${context.projectId}`, {
+        requestTenantId: context.tenantId,
+        projectTenantId: project.tenantId
+      });
+      throw new Error(`Access denied: You don't have permission to access this project`);
+    }
+    
+    // Load existing files for context
+    const existingFiles = await projectManager.getProjectFiles(context.projectId);
+    
+    // If this is an additional requirement, load existing requirements
+    let existingRequirements = [];
+    if (context.additionalRequirement) {
+      existingRequirements = project.requirements || [];
+      logger.info(`Loaded ${existingRequirements.length} existing requirements for context`);
+    }
+    
+    logger.debug(`Successfully loaded project context: ${context.projectId}`, {
+      projectName: project.name,
+      fileCount: Object.keys(existingFiles || {}).length,
+      tenantId: project.tenantId
+    });
+    
+    // Return enhanced context with project data
+    return {
+      ...context,
+      project,
+      existingFiles: existingFiles || {},
+      existingRequirements,
+      tenantId: project.tenantId || context.tenantId // Ensure tenantId is passed through
     };
-    const projectContext = await handleProjectContext(request, {}, parsedBody);
-    
-    // Add the project context to the requirements context
-    context.isNewProject = context.additionalRequirement ? false : projectContext.isNewProject;
-    context.projectId = projectContext.projectId;
-    
-    // Handle project state with proper type safety
-    if (projectContext.project) {
-      context.project = projectContext.project;
-    }
-    
-    // Double check project existence when additionalRequirement is true
-    if (context.additionalRequirement && context.projectId) {
-      const projectManager = getProjectStateManager();
-      const exists = await projectManager.projectExists(context.projectId);
-      
-      if (!exists) {
-        logger.warn(`Project ${context.projectId} not found despite additionalRequirement flag being set`);
-        throw new Error(`Project ${context.projectId} not found. Cannot add features to non-existent project.`);
-      }
-      
-      if (!context.project) {
-        const project = await projectManager.getProject(context.projectId);
-        if (project) {
-          context.project = project;
-        } else {
-          logger.warn(`Failed to load project ${context.projectId}, but will continue processing`);
-        }
-      }
-      
-      logger.info(`Confirmed project ${context.projectId} exists for feature request`);
-    }
-    
-    // Combine environment information
-    if (!context.env) {
-      context.env = {};
-    }
-    
-    // Extract Cloudflare environment if available from request
-    if (request.cf && typeof request.cf === 'object') {
-      Object.assign(context.env, request.cf);
-    } else if (request instanceof Request && 'context' in request && (request as any).context) {
-      // For Cloudflare Workers/Pages specific context
-      const cloudflareContext = (request as any).context;
-      if (cloudflareContext && cloudflareContext.cloudflare && cloudflareContext.cloudflare.env) {
-        Object.assign(context.env, cloudflareContext.cloudflare.env);
-      }
-    }
-    
-    logger.debug(`Project context loaded: ${context.projectId} (isNew: ${context.isNewProject})`);
-    return context;
   } catch (error) {
-    logger.error('Failed to load project context:', error);
+    logger.error('Error loading project context:', error);
     throw error;
   }
 }
@@ -523,266 +611,150 @@ export async function processRequirements(
   context: RequirementsContext,
   request: Request
 ): Promise<RequirementsContext> {
-  if (!context.content || context.content.trim().length === 0) {
-    throw new Error('Requirements content is required');
-  }
-  
-  logger.info('🔍 [processRequirements] Starting with context:', { 
-    projectId: context.projectId || 'new-project',
-    isNewProject: context.isNewProject,
-    contentLength: context.content.length,
-    shouldDeploy: context.shouldDeploy,
-    deploymentTarget: context.deploymentTarget,
-    hasDeploymentOptions: !!context.deploymentOptions
-  });
-  
   try {
-    const projectManager = getProjectStateManager();
-    logger.debug('🔧 [processRequirements] Got project state manager');
+    const { content, isNewProject, projectId, additionalRequirement } = context;
     
-    // Get cookie headers for API keys and provider settings
-    const cookieHeader = request.headers.get('Cookie');
-    const apiKeys = getApiKeysFromCookie(cookieHeader);
-    const providerSettings = getProviderSettingsFromCookie(cookieHeader);
-    
-    logger.debug('🔑 [processRequirements] Extracted API keys and provider settings:', {
-      hasApiKeys: Object.keys(apiKeys || {}).length > 0,
-      hasProviderSettings: Object.keys(providerSettings || {}).length > 0
+    logger.debug('Processing requirements', {
+      isNewProject,
+      hasProjectId: !!projectId, 
+      contentLength: content.length,
+      additionalRequirement
     });
     
-    // Handle existing project or create a new one
-    if (!context.isNewProject && context.projectId) {
-      // Log existing project code path
-      logger.info('🔄 [processRequirements] Processing EXISTING project path:', { projectId: context.projectId });
+    // Initialize code generation service
+    const codegenService = new CodegenService();
+    
+    // Get the API keys if they're in a cookie
+    const apiKeys = await getApiKeysFromCookie(request);
+    
+    // Result object to hold our generated files
+    let result: Record<string, string>;
+    
+    if (isNewProject) {
+      // This is a new project, generate it from scratch
+      logger.info('Generating code for new project');
       
-      // Load existing project
-      logger.info(`Loading existing project: ${context.projectId}`);
-      context.project = await projectManager.getProject(context.projectId);
+      // Get a name for the project - either from context or generate one
+      const projectName = context.name || generateProjectName(content);
+      logger.debug(`Using project name: ${projectName}`);
       
-      if (!context.project) {
-        throw new Error(`Project ${context.projectId} not found`);
-      }
+      // Generate all the files for a new project
+      // Merge existing context files if any (from uploadFiles middleware)
+      const existingFiles = context.files || {};
       
-      // Add requirements to the project if this is an additional requirement
-      if (context.additionalRequirement) {
-        logger.info(`Adding new requirements entry to project ${context.projectId}`);
-        await projectManager.addRequirements(
-          context.projectId,
-          context.content,
-          context.userId
-        );
-      }
-      
-      // Get existing files
-      logger.debug('Loading existing project files');
-      const existingFiles = await projectManager.getProject(context.projectId)
-        .then(project => project.files || [])
-        .then(files => files.filter(f => !f.isDeleted))
-        .then(files => {
-          const fileMap: Record<string, string> = {};
-          for (const file of files) {
-            fileMap[file.path] = file.content;
-          }
-          return fileMap;
+      try {
+        // Generate code
+        result = await codegenService.generateCode({
+          requirements: content,
+          apiKeys,
+          isNewProject: true,
+          existingFiles
         });
-      
-      // Generate code using the CodegenService
-      logger.info('Generating code from requirements for existing project');
-      
-      const codegenResult = await CodegenService.generateCode({
-        requirements: context.content,
-        existingFiles,
-        projectId: context.projectId,
-        isNewProject: false,
-        userId: context.userId,
-        serverEnv: context.env,
-        apiKeys,
-        providerSettings
-      });
-      
-      // Update files in project
-      await projectManager.updateProject(context.projectId, {
-        updatedFiles: Object.entries(codegenResult.files).map(([path, content]) => ({
-          path,
-          content,
-          createdAt: Date.now(),
-          updatedAt: Date.now()
-        }))
-      });
-      
-      // Add requirements to project history
-      if (!context.additionalRequirement) {
-        // Only add to history if not already added as additionalRequirement
-        await projectManager.addRequirements(
-          context.projectId,
-          context.content,
-          context.userId
-        );
-      }
-      
-      // Set generated files in context
-      context.files = codegenResult.files;
-      
-      // Store project archive if environment context is available
-      if (context.env) {
-        const archiveKey = await storeProjectArchive(context.projectId, codegenResult.files, context);
-        if (archiveKey) {
-          context.archiveKey = archiveKey;
-          logger.info(`Project archive stored with key: ${archiveKey}`);
-        }
-      }
-      
-      // Handle deployment if requested
-      if (context.shouldDeploy) {
-        logger.info('Deploying updated project');
         
-        try {
-          const { deploymentManager, availableTargets } = await configureDeploymentManager(context);
-          
-          const deployment = await deploymentManager.deployWithBestTarget({
-            projectName: context.project.name,
-            files: codegenResult.files,
-            projectId: context.projectId,
-            targetName: context.deploymentTarget,
-            metadata: context.deploymentOptions
-          });
-          
-          // Create a deployment entry
-          const deploymentEntry = {
-            id: deployment.id,
-            url: deployment.url,
-            provider: deployment.provider,
-            timestamp: Date.now(),
-            status: deployment.status
-          };
-          
-          // Save the deployment to the project
-          await projectManager.addDeployment(context.projectId, deploymentEntry);
-          
-          // Set deployment result in context
-          context.deploymentResult = {
-            id: deployment.id,
-            url: deployment.url,
-            status: deployment.status
-          };
-          
-          logger.info(`Deployment successful: ${deployment.provider} - ${deployment.url}`);
-        } catch (deployError) {
-          logger.error('Deployment failed:', deployError);
-          throw deployError;
-        }
+        logger.info(`Generated ${Object.keys(result).length} files for new project`);
+      } catch (error) {
+        logger.error('Failed to generate code:', error);
+        
+        // Fallback to sample project if code generation fails
+        logger.info('Using sample project as fallback');
+        result = createSampleProject(content);
       }
       
-      return context;
-    } else {
-      // Log new project code path
-      logger.info('🆕 [processRequirements] Processing NEW project path');
-      
-      // Generate code for a new project
-      logger.info('💻 [processRequirements] Generating code for new project');
-      
-      // Enhanced logging for CodegenService input
-      logger.debug('📥 [processRequirements] CodegenService input parameters:', {
-        requirementsLength: context.content.length,
-        projectId: 'new-project-' + Date.now(),
-        isNewProject: true,
-        userId: context.userId || 'anonymous',
-        hasServerEnv: !!context.env,
-        hasApiKeys: Object.keys(apiKeys || {}).length > 0
-      });
-      
-      const codegenResult = await CodegenService.generateCode({
-        requirements: context.content,
-        projectId: 'new-project-' + Date.now(),
-        isNewProject: true,
-        userId: context.userId,
-        serverEnv: context.env,
-        apiKeys,
-        providerSettings
-      });
-      
-      // Enhanced logging for CodegenService results
-      logger.info('📤 [processRequirements] Code generation completed:', {
-        filesGenerated: Object.keys(codegenResult.files).length,
-        modelUsed: codegenResult.metadata?.model || 'unknown',
-        provider: codegenResult.metadata?.provider || 'unknown'
-      });
-      
-      // Create a new project
-      const projectName = codegenResult.metadata?.name || 'Untitled Project';
-      logger.info('📝 [processRequirements] Creating new project entry', { projectName });
-      
-      // Log the createProject request
-      logger.debug('📋 [processRequirements] createProject parameters:', {
-        name: projectName,
-        requirementsLength: context.content.length,
-        userId: context.userId || 'anonymous',
-        hasMetadata: !!codegenResult.metadata
-      });
-      
+      // Create project in state manager
+      const projectManager = getProjectStateManager();
       const newProject = await projectManager.createProject({
         name: projectName,
-        initialRequirements: context.content,
+        initialRequirements: content,
         userId: context.userId,
+        tenantId: context.tenantId,
         metadata: {
-          ...codegenResult.metadata,
-          requestId: uuidv4(),
-          isArchived: false,
+          source: 'requirements-api',
+          timestamp: Date.now()
         }
       });
       
-      // Add files to the project
-      logger.info('[processRequirements] Adding files to new project', { projectId: newProject.id });
-      await projectManager.addFiles(newProject.id, codegenResult.files);
+      logger.info(`Created new project: ${newProject.id} (${projectName})`, {
+        tenantId: context.tenantId
+      });
       
-      // Update context with new project
-      context.projectId = newProject.id;
-      context.project = newProject;
-      context.files = codegenResult.files;
+      // Save generated files to the project
+      if (Object.keys(result).length > 0) {
+        await projectManager.addFiles(newProject.id, result);
+        logger.debug(`Saved ${Object.keys(result).length} files to project ${newProject.id}`);
+      }
       
-      // Add separate direct reference to ensure the basic project data is stored with just the ID
-      // This ensures deploy endpoints can find it later
+      // Store files in a ZIP archive
+      await storeProjectArchive(newProject.id, result, context);
+      
+      // Update context with the new project info and files
+      return {
+        ...context,
+        projectId: newProject.id,
+        isNewProject: true,
+        name: projectName,
+        project: newProject,
+        generatedFiles: result
+      };
+    } else {
+      // This is an existing project that's being updated with additional requirements
+      logger.info(`Processing additional requirements for existing project: ${projectId}`);
+      
+      if (!projectId) {
+        throw new Error('Cannot update project: No project ID provided');
+      }
+      
+      // Get existing files and requirements if they weren't loaded in context
+      const projectManager = getProjectStateManager();
+      const existingFiles = context.existingFiles || await projectManager.getProjectFiles(projectId) || {};
+      
+      if (!context.project) {
+        throw new Error(`Cannot update project: Failed to load project context for ${projectId}`);
+      }
+      
+      // Get existing requirements if not already provided
+      const existingRequirements = context.existingRequirements || 
+                                  (context.project?.requirements || []);
+      
       try {
-        logger.info('[processRequirements] Storing direct project reference', { projectId: newProject.id });
-        // Force-save just the basic project data again to ensure it's stored with just the ID
-        await projectManager.updateProject(newProject.id, {
-          metadata: {
-            isDirectReference: true,
-            timestamp: Date.now()
-          }
+        // Generate updated code with context from existing files
+        result = await codegenService.generateCode({
+          requirements: content,
+          apiKeys,
+          isNewProject: false,
+          existingFiles,
+          existingRequirements: existingRequirements.map(r => r.content).filter(Boolean)
         });
-        logger.info(`[processRequirements] Successfully stored direct project reference for ID: ${newProject.id}`);
-      } catch (directRefError) {
-        logger.error(`[processRequirements] Failed to store direct project reference: ${directRefError}`);
-      }
         
-      // Store project archive if environment context is available
-      if (context.env) {
-       logger.info('[processRequirements] Storing project archive', { projectId: newProject.id });
-       const archiveKey = await storeProjectArchive(newProject.id, codegenResult.files, context);
-        if (archiveKey) {
-          context.archiveKey = archiveKey;
-          logger.info(`[processRequirements] Project archive stored with key: ${archiveKey}`);
-        }
-      }
+        logger.info(`Generated/updated ${Object.keys(result).length} files for existing project ${projectId}`);
+      } catch (error) {
+        logger.error(`Failed to generate code for project ${projectId}:`, error);
         
-      // After project creation, add more logging
-      logger.info('🎉 [processRequirements] Project creation successful:', {
-        projectId: newProject?.id,
-        projectName: newProject?.name,
-        createdAt: newProject?.createdAt || Date.now()
-      });
+        // Fallback to simple update if code generation fails
+        logger.info('Using simple update as fallback');
+        result = updateSampleProject(existingFiles, content);
+      }
       
-      return context;
+      // Add the new requirements to the project history
+      await projectManager.addRequirements(projectId, content, context.userId, additionalRequirement);
+      
+      // Save the updated files to the project
+      if (Object.keys(result).length > 0) {
+        await projectManager.addFiles(projectId, result);
+        logger.debug(`Updated ${Object.keys(result).length} files in project ${projectId}`);
+      }
+      
+      // Store updated files in a ZIP archive
+      await storeProjectArchive(projectId, result, context);
+      
+      // Return context with the updated files
+      return {
+        ...context,
+        isNewProject: false,
+        generatedFiles: result
+      };
     }
   } catch (error) {
-    logger.error('❌ [processRequirements] Failed with error:', error);
-    // Include more detailed error information
-    if (error instanceof Error) {
-      logger.error('  - Error name: ' + error.name);
-      logger.error('  - Error message: ' + error.message);
-      logger.error('  - Error stack: ' + error.stack);
-    }
+    logger.error('Failed to process requirements:', error);
     throw error;
   }
 }

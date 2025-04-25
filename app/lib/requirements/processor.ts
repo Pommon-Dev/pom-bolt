@@ -53,13 +53,169 @@ export async function processWebhooks(
   projectState: ProjectState,
   webhooks: WebhookConfig[]
 ): Promise<WebhookConfig[]> {
-  logger.info('Processing webhooks', { projectId: projectState.id, count: webhooks.length });
+  logger.info('Processing webhooks', { 
+    projectId: projectState.id, 
+    count: webhooks.length,
+    tenantId: projectState.tenantId || 'none'
+  });
 
-  const validWebhooks = webhooks.filter(validateWebhookConfig);
+  // Validate tenant information in webhooks if project has a tenant
+  const webhooksWithValidTenant = projectState.tenantId 
+    ? webhooks.filter(webhook => {
+        // If webhook has no tenantId or has matching tenantId
+        const isValid = !webhook.tenantId || webhook.tenantId === projectState.tenantId;
+        if (!isValid) {
+          logger.warn('Webhook tenant mismatch, skipping webhook', {
+            webhookTenantId: webhook.tenantId,
+            projectTenantId: projectState.tenantId,
+            url: webhook.url
+          });
+        }
+        return isValid;
+      })
+    : webhooks;
   
-  // TODO: Implement actual webhook processing logic
-  // This is a placeholder that returns valid webhooks
-  return validWebhooks;
+  // Filter for valid configurations
+  const validWebhooks = webhooksWithValidTenant.filter(webhook => {
+    const isValidConfig = validateWebhookConfig(webhook);
+    if (!isValidConfig) {
+      logger.error('Invalid webhook configuration, skipping webhook', {
+        url: webhook.url,
+        method: webhook.method,
+        tenantId: webhook.tenantId || 'none'
+      });
+    }
+    return isValidConfig;
+  });
+  
+  // Add tenant information to webhooks that don't have it and initialize status
+  const enhancedWebhooks = validWebhooks.map(webhook => ({
+    ...webhook,
+    tenantId: webhook.tenantId || projectState.tenantId,
+    // Initialize status tracking
+    status: 'pending' as 'pending' | 'success' | 'error',
+    lastAttempt: null as number | null,
+    retries: 0
+  }));
+  
+  logger.debug('Processed webhooks', {
+    originalCount: webhooks.length,
+    validCount: enhancedWebhooks.length,
+    tenantId: projectState.tenantId || 'none'
+  });
+  
+  // Execute webhook calls
+  const processedWebhooks = await Promise.all(
+    enhancedWebhooks.map(async webhook => {
+      try {
+        const updatedWebhook = { ...webhook };
+        updatedWebhook.lastAttempt = Date.now();
+        
+        // Prepare request headers
+        const headers = new Headers({
+          'Content-Type': 'application/json',
+          ...webhook.headers
+        });
+        
+        // Add tenant ID header if available
+        if (webhook.tenantId) {
+          headers.set('x-tenant-id', webhook.tenantId);
+        }
+        
+        // Prepare request body
+        const body = JSON.stringify({
+          ...(webhook.body || {}),
+          projectId: projectState.id,
+          timestamp: Date.now(),
+          tenantId: webhook.tenantId || projectState.tenantId
+        });
+        
+        // Execute HTTP request with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+        
+        logger.info(`Executing webhook to ${webhook.url}`, {
+          method: webhook.method,
+          bodyLength: body.length,
+          tenantId: webhook.tenantId || 'none'
+        });
+        
+        try {
+          const response = await fetch(webhook.url, {
+            method: webhook.method,
+            headers,
+            body,
+            signal: controller.signal
+          });
+          
+          // Clear timeout
+          clearTimeout(timeoutId);
+          
+          // Check response status
+          if (response.ok) {
+            logger.info(`Webhook call successful: ${webhook.url}`, {
+              status: response.status,
+              tenantId: webhook.tenantId || 'none'
+            });
+            updatedWebhook.status = 'success';
+            updatedWebhook.lastResponse = {
+              status: response.status,
+              timestamp: Date.now()
+            };
+          } else {
+            logger.warn(`Webhook call failed: ${webhook.url}`, {
+              status: response.status,
+              tenantId: webhook.tenantId || 'none'
+            });
+            updatedWebhook.status = 'error';
+            updatedWebhook.lastResponse = {
+              status: response.status,
+              error: `HTTP error: ${response.status}`,
+              timestamp: Date.now()
+            };
+          }
+        } catch (error) {
+          // Clear timeout
+          clearTimeout(timeoutId);
+          
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          logger.error(`Webhook call failed: ${webhook.url}`, {
+            error: errorMessage,
+            tenantId: webhook.tenantId || 'none'
+          });
+          
+          updatedWebhook.status = 'error';
+          updatedWebhook.lastResponse = {
+            error: errorMessage,
+            timestamp: Date.now()
+          };
+          
+          // Increment retry count for future retries
+          updatedWebhook.retries++;
+        }
+        
+        return updatedWebhook;
+      } catch (error) {
+        // Handle any unexpected errors during processing
+        logger.error(`Unexpected error processing webhook: ${webhook.url}`, {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          tenantId: webhook.tenantId || 'none'
+        });
+        
+        return {
+          ...webhook,
+          status: 'error',
+          lastAttempt: Date.now(),
+          lastResponse: {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            timestamp: Date.now()
+          }
+        };
+      }
+    })
+  );
+  
+  return processedWebhooks;
 }
 
 /**

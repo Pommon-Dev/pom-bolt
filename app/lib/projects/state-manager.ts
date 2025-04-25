@@ -84,13 +84,16 @@ export class ProjectStateManager {
   async createProject(options: CreateProjectOptions): Promise<ProjectState> {
     logger.debug('Creating new project', { 
       name: options.name,
-      metadata: options.metadata
+      metadata: options.metadata,
+      tenantId: options.tenantId
     });
     try {
       const now = Date.now();
       const projectId = uuidv4();
       
-      logger.info(`Creating new project: ${options.name} (${projectId})`);
+      logger.info(`Creating new project: ${options.name} (${projectId})`, {
+        tenantId: options.tenantId
+      });
       
       // Initialize the requirements entry if provided
       const requirements: RequirementsEntry[] = [];
@@ -112,6 +115,7 @@ export class ProjectStateManager {
         files: [],
         requirements,
         deployments: [],
+        tenantId: options.tenantId,
         metadata: {
           ...options.metadata,
           userId: options.userId
@@ -129,7 +133,8 @@ export class ProjectStateManager {
       
       logger.info('Project created successfully', { 
         id: project.id,
-        name: project.name
+        name: project.name,
+        tenantId: project.tenantId
       });
       return project;
     } catch (error) {
@@ -140,9 +145,11 @@ export class ProjectStateManager {
   
   /**
    * Get a project by ID
+   * @param id Project ID
+   * @param tenantId Optional tenant ID for access validation
    */
-  async getProject(id: string): Promise<ProjectState | null> {
-    logger.debug(`Getting project ${id}`);
+  async getProject(id: string, tenantId?: string): Promise<ProjectState | null> {
+    logger.debug(`Getting project ${id}`, { tenantId: tenantId || 'none' });
     try {
       let project: ProjectState | null = null;
       
@@ -155,9 +162,24 @@ export class ProjectStateManager {
         project = await this.storageAdapter.getProject(id);
       }
       
+      // If project is found and tenant validation is requested
+      if (project && tenantId) {
+        // If project has a tenant ID and it doesn't match the requested tenant ID
+        if (project.tenantId && project.tenantId !== tenantId) {
+          logger.warn('Tenant access denied', {
+            projectId: id,
+            projectTenant: project.tenantId,
+            requestTenant: tenantId
+          });
+          return null; // Return null to indicate project not found or not accessible
+        }
+      }
+      
       logger.debug(`Project ${id} retrieval result:`, { 
         found: !!project,
-        projectName: project?.name
+        projectName: project?.name,
+        projectTenant: project?.tenantId,
+        tenantValidated: !!tenantId
       });
       return project;
     } catch (error) {
@@ -188,11 +210,20 @@ export class ProjectStateManager {
   /**
    * Update a project
    */
-  async updateProject(id: string, options: UpdateProjectOptions): Promise<ProjectUpdateResult> {
-    logger.debug(`Updating project: ${id}`);
+  async updateProject(id: string, options: UpdateProjectOptions, tenantId?: string): Promise<ProjectUpdateResult> {
+    logger.debug(`Updating project: ${id}`, { tenantId: tenantId || 'none' });
     
-    // Get the current project state
-    const project = await this.getProject(id);
+    // Get the current project state with tenant validation if provided
+    const project = await this.getProject(id, tenantId);
+    
+    // If project not found or tenant access denied
+    if (!project) {
+      const errorMsg = tenantId 
+        ? `Project not found or access denied: ${id}` 
+        : `Project not found: ${id}`;
+      logger.error(errorMsg, { tenantId: tenantId || 'none' });
+      throw new Error(errorMsg);
+    }
     
     // Track changes for the result
     const newFiles: ProjectFile[] = [];
@@ -262,6 +293,18 @@ export class ProjectStateManager {
       };
     }
     
+    // Update webhooks if provided
+    if (options.webhooks) {
+      // If webhooks property doesn't exist, initialize it
+      if (!project.webhooks) {
+        project.webhooks = [];
+      }
+      
+      // Add or update webhooks
+      project.webhooks = [...options.webhooks];
+      logger.debug(`Updated ${options.webhooks.length} webhooks for project ${id}`);
+    }
+    
     // Update the timestamp
     project.updatedAt = Date.now();
     
@@ -307,6 +350,7 @@ export class ProjectStateManager {
    */
   async listProjects(options?: {
     userId?: string;
+    tenantId?: string;
     limit?: number;
     offset?: number;
     sortBy?: 'createdAt' | 'updatedAt';
@@ -321,10 +365,12 @@ export class ProjectStateManager {
         // Convert options to search options
         const searchOptions = {
           query: '',
+          // Cast to any to work around type incompatibility
           filters: {
+            // Add tenant filtering if provided
+            tenantId: options?.tenantId,
             // Add any relevant filters based on the options
-            // Note: userId is not part of the SearchProjectsOptions filters
-          },
+          } as any,
           pagination: options?.limit ? {
             limit: options.limit,
             offset: options?.offset || 0
@@ -341,14 +387,26 @@ export class ProjectStateManager {
         const projects = result.projects.map(p => this.convertFromEnhancedProject(p));
         logger.debug('Projects listed successfully', { 
           count: projects.length,
-          total: result.total
+          total: result.total,
+          tenantId: options?.tenantId
         });
         return {
           projects,
           total: result.total
         };
       } else {
-        return this.storageAdapter.listProjects(options);
+        const result = await this.storageAdapter.listProjects(options);
+        
+        // Filter by tenantId if specified
+        if (options?.tenantId) {
+          const filteredProjects = result.projects.filter(p => p.tenantId === options.tenantId);
+          return {
+            projects: filteredProjects,
+            total: filteredProjects.length
+          };
+        }
+        
+        return result;
       }
     } catch (error) {
       logger.error('Error listing projects:', error);
@@ -358,11 +416,23 @@ export class ProjectStateManager {
   
   /**
    * Get files from a project with filtering options
+   * @param projectId Project ID
+   * @param options Filtering options
+   * @param tenantId Optional tenant ID for access validation
    */
-  async getProjectFiles(projectId: string, options?: GetProjectFilesOptions): Promise<ProjectFile[]> {
-    logger.debug(`Getting files for project: ${projectId}`);
+  async getProjectFiles(projectId: string, options?: GetProjectFilesOptions, tenantId?: string): Promise<ProjectFile[]> {
+    logger.debug(`Getting files for project: ${projectId}`, { tenantId: tenantId || 'none' });
     
-    const project = await this.getProject(projectId);
+    const project = await this.getProject(projectId, tenantId);
+    
+    if (!project) {
+      const errorMsg = tenantId 
+        ? `Project not found or access denied: ${projectId}` 
+        : `Project not found: ${projectId}`;
+      logger.error(errorMsg, { tenantId: tenantId || 'none' });
+      return [];
+    }
+    
     let files = project.files;
     
     // Filter out deleted files unless explicitly included
@@ -391,11 +461,27 @@ export class ProjectStateManager {
   
   /**
    * Add a deployment to a project
+   * @param projectId ID of the project
+   * @param deployment Deployment information
+   * @param tenantId Optional tenant ID for access validation
    */
-  async addDeployment(projectId: string, deployment: Omit<ProjectDeployment, 'id'>): Promise<ProjectDeployment> {
-    logger.debug(`Adding deployment for project: ${projectId}`);
+  async addDeployment(
+    projectId: string, 
+    deployment: Omit<ProjectDeployment, 'id'>,
+    tenantId?: string
+  ): Promise<ProjectDeployment> {
+    logger.debug(`Adding deployment for project: ${projectId}`, { tenantId: tenantId || 'none' });
     
-    const project = await this.getProject(projectId);
+    const project = await this.getProject(projectId, tenantId);
+    
+    if (!project) {
+      const errorMsg = tenantId 
+        ? `Project not found or access denied: ${projectId}` 
+        : `Project not found: ${projectId}`;
+      logger.error(errorMsg, { tenantId: tenantId || 'none' });
+      throw new Error(errorMsg);
+    }
+    
     const deploymentId = uuidv4();
     
     const newDeployment: ProjectDeployment = {
@@ -421,21 +507,42 @@ export class ProjectStateManager {
   
   /**
    * Get a project's deployments
+   * @param projectId Project ID
+   * @param tenantId Optional tenant ID for access validation
    */
-  async getProjectDeployments(projectId: string): Promise<ProjectDeployment[]> {
-    logger.debug(`Getting deployments for project: ${projectId}`);
+  async getProjectDeployments(projectId: string, tenantId?: string): Promise<ProjectDeployment[]> {
+    logger.debug(`Getting deployments for project: ${projectId}`, { tenantId: tenantId || 'none' });
     
-    const project = await this.getProject(projectId);
+    const project = await this.getProject(projectId, tenantId);
+    
+    if (!project) {
+      const errorMsg = tenantId 
+        ? `Project not found or access denied: ${projectId}` 
+        : `Project not found: ${projectId}`;
+      logger.error(errorMsg, { tenantId: tenantId || 'none' });
+      return [];
+    }
+    
     return project.deployments;
   }
   
   /**
    * Get a project's current deployment
+   * @param projectId Project ID
+   * @param tenantId Optional tenant ID for access validation
    */
-  async getCurrentDeployment(projectId: string): Promise<ProjectDeployment | null> {
-    logger.debug(`Getting current deployment for project: ${projectId}`);
+  async getCurrentDeployment(projectId: string, tenantId?: string): Promise<ProjectDeployment | null> {
+    logger.debug(`Getting current deployment for project: ${projectId}`, { tenantId: tenantId || 'none' });
     
-    const project = await this.getProject(projectId);
+    const project = await this.getProject(projectId, tenantId);
+    
+    if (!project) {
+      const errorMsg = tenantId 
+        ? `Project not found or access denied: ${projectId}` 
+        : `Project not found: ${projectId}`;
+      logger.error(errorMsg, { tenantId: tenantId || 'none' });
+      return null;
+    }
     
     if (!project.currentDeploymentId) {
       return null;
@@ -447,11 +554,22 @@ export class ProjectStateManager {
   
   /**
    * Get a project's requirements history
+   * @param projectId Project ID 
+   * @param tenantId Optional tenant ID for access validation
    */
-  async getRequirementsHistory(projectId: string): Promise<RequirementsEntry[]> {
-    logger.debug(`Getting requirements history for project: ${projectId}`);
+  async getRequirementsHistory(projectId: string, tenantId?: string): Promise<RequirementsEntry[]> {
+    logger.debug(`Getting requirements history for project: ${projectId}`, { tenantId: tenantId || 'none' });
     
-    const project = await this.getProject(projectId);
+    const project = await this.getProject(projectId, tenantId);
+    
+    if (!project) {
+      const errorMsg = tenantId 
+        ? `Project not found or access denied: ${projectId}` 
+        : `Project not found: ${projectId}`;
+      logger.error(errorMsg, { tenantId: tenantId || 'none' });
+      return [];
+    }
+    
     return project.requirements;
   }
   
@@ -482,19 +600,31 @@ export class ProjectStateManager {
   async addRequirements(
     projectId: string,
     content: string,
-    userId?: string
+    userId?: string,
+    isAdditionalRequirement?: boolean
   ): Promise<RequirementsEntry> {
-    logger.debug(`Adding requirements to project: ${projectId}`);
+    logger.debug(`Adding requirements to project: ${projectId}`, {
+      isAdditionalRequirement: !!isAdditionalRequirement,
+      contentLength: content.length
+    });
     
     // Get the project
     const project = await this.getProject(projectId);
+    
+    if (!project) {
+      logger.error(`Project ${projectId} not found when adding requirements`);
+      throw new Error(`Project ${projectId} not found`);
+    }
     
     // Create a new requirements entry
     const requirementsEntry: RequirementsEntry = {
       id: uuidv4(),
       content,
       timestamp: Date.now(),
-      userId
+      userId,
+      metadata: {
+        isAdditionalRequirement: !!isAdditionalRequirement
+      }
     };
     
     // Add it to the project
@@ -510,7 +640,10 @@ export class ProjectStateManager {
       await this.storageAdapter.saveProject(project);
     }
     
-    logger.info(`Added requirements entry to project ${projectId}`);
+    logger.info(`Added requirements entry to project ${projectId}`, {
+      requirementId: requirementsEntry.id,
+      isAdditionalRequirement: !!isAdditionalRequirement
+    });
     return requirementsEntry;
   }
   
@@ -522,31 +655,35 @@ export class ProjectStateManager {
     const enhancedProject: EnhancedProjectState = {
       ...project,
       metadata: {
-        version: 1,
+        ...(project.metadata || {}),
+        version: '1', // Use string for version
         type: 'new-project',
         description: project.name,
-        tags: [],
-        searchIndex: {
-          keywords: [],
-          features: [],
-          technologies: []
-        }
+        tags: []
       },
+      // Cast files to EnhancedProjectFile[] to work around missing properties
       files: project.files.map(file => ({
         ...file,
         chunks: file.content ? Math.ceil(file.content.length / (1024 * 1024)) : 0,
         hash: '', // This would be calculated in a real implementation
-        size: file.content ? file.content.length : 0
-      }))
+        size: file.content ? file.content.length : 0,
+        mimeType: 'text/plain', // Default mime type
+        version: '1' // Default version
+      })) as any,
+      // Add required properties for EnhancedProjectState
+      version: 1,
+      status: 'active',
+      searchIndex: {
+        keywords: [],
+        features: [],
+        technologies: []
+      },
+      // Ensure requirements and deployments are properly typed
+      requirements: project.requirements as any,
+      deployments: project.deployments as any,
+      // Ensure webhooks array exists
+      webhooks: project.webhooks || []
     };
-    
-    // If the project already has metadata, merge it
-    if (project.metadata) {
-      enhancedProject.metadata = {
-        ...enhancedProject.metadata,
-        ...project.metadata
-      };
-    }
     
     return enhancedProject;
   }

@@ -24,6 +24,15 @@ export interface WebhookConfig {
   method: string;
   headers?: Record<string, string>;
   body?: Record<string, any>;
+  tenantId?: string;     // ID of the tenant that owns this webhook
+  status?: 'pending' | 'success' | 'error'; // Current status of the webhook
+  lastAttempt?: number | null;  // Timestamp of the last attempt
+  retries?: number;      // Number of retries attempted
+  lastResponse?: {      // Information about the last response
+    status?: number;     // HTTP status code
+    error?: string;      // Error message if any
+    timestamp: number;   // When the response was received
+  };
 }
 
 /**
@@ -36,8 +45,14 @@ export interface RequirementsEntry extends BaseRequirementsEntry {
 }
 
 /**
- * Enhanced project state with requirements
+ * Enhanced project state with requirements and webhooks
  */
-export interface EnhancedProjectState extends ProjectState {
+export interface RequirementsProjectState extends ProjectState {
   webhooks: WebhookConfig[];
-} 
+}
+
+/**
+ * Alias for backwards compatibility
+ * @deprecated Use RequirementsProjectState instead
+ */
+export type EnhancedProjectState = RequirementsProjectState; 
