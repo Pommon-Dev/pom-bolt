@@ -4,23 +4,21 @@
 
 echo "Setting up D1 database for local development environment..."
 
-# First, create the tables
-echo "Step 1: Creating tables..."
-npx wrangler d1 execute pom_bolt_metadata --local --file=./schema-tables.sql
+# Get the database name from wrangler.toml (default to pom-bolt-db if not found)
+DB_NAME="pom-bolt-db"
+
+# Create all tables and indexes
+echo "Step 1: Creating tables and indexes..."
+npx wrangler d1 execute $DB_NAME --local --file=./schema-combined.sql
 if [ $? -ne 0 ]; then
   echo "Error creating tables. Aborting setup."
   exit 1
 fi
 
-# After tables are created, add indexes
-echo "Step 2: Creating indexes..."
-npx wrangler d1 execute pom_bolt_metadata --local --file=./schema-indexes.sql
-if [ $? -ne 0 ]; then
-  echo "Warning: Error creating some indexes. Database may not be fully optimized."
-fi
-
 # Check if tables were created correctly
-echo "Step 3: Verifying database setup..."
-npx wrangler d1 execute pom_bolt_metadata --local --command="SELECT name FROM sqlite_master WHERE type='table';"
+echo "Step 2: Verifying database setup..."
+npx wrangler d1 execute $DB_NAME --local --command="SELECT name FROM sqlite_master WHERE type='table';"
+echo "Checking indexes..."
+npx wrangler d1 execute $DB_NAME --local --command="SELECT name FROM sqlite_master WHERE type='index';"
 
 echo "D1 database setup complete!" 

@@ -111,12 +111,14 @@ cat > "$REQUEST_FILE" << EOF
   "shouldDeploy": true,
   "deploymentTarget": "netlify-github",
   "setupGitHub": true,
-  "githubCredentials": {
-    "token": "${GITHUB_TOKEN}",
-    "owner": "${GITHUB_OWNER}"
-  },
-  "netlifyCredentials": {
-    "apiToken": "${NETLIFY_TOKEN}"
+  "credentials": {
+    "github": {
+      "token": "${GITHUB_TOKEN}",
+      "owner": "${GITHUB_OWNER}"
+    },
+    "netlify": {
+      "apiToken": "${NETLIFY_TOKEN}"
+    }
   }
 }
 EOF

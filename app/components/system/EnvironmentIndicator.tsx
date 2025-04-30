@@ -10,6 +10,11 @@ export function EnvironmentIndicator({ showInProduction = false }: { showInProdu
   const [isExpanded, setIsExpanded] = useState(false);
   const environmentInfo = getEnvironmentInfo();
 
+  // Handle case where environment info is not available yet
+  if (!environmentInfo) {
+    return null;
+  }
+
   // Hide in production environments unless explicitly enabled
   if (environmentInfo.isProduction && !showInProduction) {
     return null;
@@ -17,13 +22,15 @@ export function EnvironmentIndicator({ showInProduction = false }: { showInProdu
 
   // Choose color based on environment type
   const getEnvColor = () => {
+    if (typeof environmentInfo.type === 'string' && environmentInfo.type === 'unknown') {
+      return 'bg-gray-600';
+    }
+    
     switch (environmentInfo.type) {
       case EnvironmentType.LOCAL:
         return 'bg-blue-600';
       case EnvironmentType.CLOUDFLARE:
-        return environmentInfo.isPreview ? 'bg-amber-600' : 'bg-green-600';
-      case EnvironmentType.CONTAINER:
-        return 'bg-purple-600';
+        return environmentInfo.isDevelopment ? 'bg-amber-600' : 'bg-green-600';
       default:
         return 'bg-gray-600';
     }
@@ -31,13 +38,15 @@ export function EnvironmentIndicator({ showInProduction = false }: { showInProdu
 
   // Get environment label
   const getEnvLabel = () => {
+    if (typeof environmentInfo.type === 'string' && environmentInfo.type === 'unknown') {
+      return 'Dev Environment';
+    }
+    
     switch (environmentInfo.type) {
       case EnvironmentType.LOCAL:
         return 'Local Dev';
       case EnvironmentType.CLOUDFLARE:
-        return environmentInfo.isPreview ? 'CF Preview' : 'CF Production';
-      case EnvironmentType.CONTAINER:
-        return 'Container';
+        return environmentInfo.isDevelopment ? 'CF Preview' : 'CF Production';
       default:
         return 'Unknown';
     }
@@ -55,10 +64,9 @@ export function EnvironmentIndicator({ showInProduction = false }: { showInProdu
       {isExpanded && (
         <div className="mt-2 bg-gray-800 text-white p-2 rounded-md shadow-lg">
           <div className="font-bold">Environment Info</div>
-          <div>Type: {environmentInfo.type}</div>
+          <div>Type: {environmentInfo.type || 'Unknown'}</div>
           <div>Production: {environmentInfo.isProduction ? 'Yes' : 'No'}</div>
           <div>Development: {environmentInfo.isDevelopment ? 'Yes' : 'No'}</div>
-          <div>Preview: {environmentInfo.isPreview ? 'Yes' : 'No'}</div>
           <div className="mt-1 text-gray-300">Click to collapse</div>
         </div>
       )}

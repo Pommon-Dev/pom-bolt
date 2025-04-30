@@ -11,6 +11,8 @@ import { FaCloud, FaBrain } from 'react-icons/fa';
 import type { IconType } from 'react-icons';
 import { useSettings } from '~/lib/hooks/useSettings';
 import { useToast } from '~/components/ui/use-toast';
+import WithTooltip from '~/components/ui/Tooltip';
+import * as RadixTooltip from '@radix-ui/react-tooltip';
 
 // Types
 type ProviderName =
@@ -686,193 +688,225 @@ const ServiceStatusTab = () => {
     }
   };
 
-  return (
-    <div className="space-y-6">
+  // Function to get status text for display in the tooltip
+  const getStatusText = (status: 'operational' | 'degraded' | 'down'): string => {
+    switch (status) {
+      case 'operational':
+        return 'Operational';
+      case 'degraded':
+        return 'Degraded Performance';
+      case 'down':
+        return 'Service Outage';
+      default:
+        return 'Unknown';
+    }
+  };
+
+  // Modify the service item rendering to include tooltips
+  const renderServiceItems = () => {
+    return serviceStatuses.map((service, index) => (
       <motion.div
-        className="space-y-4"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-      >
-        <div className="flex items-center justify-between gap-2 mt-8 mb-4">
-          <div className="flex items-center gap-2">
-            <div
-              className={classNames(
-                'w-8 h-8 flex items-center justify-center rounded-lg',
-                'bg-bolt-elements-background-depth-3',
-                'text-purple-500',
-              )}
-            >
-              <TbActivityHeartbeat className="w-5 h-5" />
-            </div>
-            <div>
-              <h4 className="text-md font-medium text-bolt-elements-textPrimary">Service Status</h4>
-              <p className="text-sm text-bolt-elements-textSecondary">
-                Monitor and test the operational status of cloud LLM providers
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-bolt-elements-textSecondary">
-              Last updated: {lastRefresh.toLocaleTimeString()}
-            </span>
-            <button
-              onClick={() => fetchAllStatuses()}
-              className={classNames(
-                'px-3 py-1.5 rounded-lg text-sm',
-                'bg-bolt-elements-background-depth-3 hover:bg-bolt-elements-background-depth-4',
-                'text-bolt-elements-textPrimary',
-                'transition-all duration-200',
-                'flex items-center gap-2',
-                loading ? 'opacity-50 cursor-not-allowed' : '',
-              )}
-              disabled={loading}
-            >
-              <div className={`i-ph:arrows-clockwise w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-              <span>{loading ? 'Refreshing...' : 'Refresh'}</span>
-            </button>
-          </div>
-        </div>
-
-        {/* API Key Test Section */}
-        <div className="p-4 bg-bolt-elements-background-depth-2 rounded-lg">
-          <h5 className="text-sm font-medium text-bolt-elements-textPrimary mb-2">Test API Key</h5>
-          <div className="flex gap-2">
-            <select
-              value={testProvider}
-              onChange={(e) => setTestProvider(e.target.value as ProviderName)}
-              className={classNames(
-                'flex-1 px-3 py-1.5 rounded-lg text-sm max-w-[200px]',
-                'bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor',
-                'text-bolt-elements-textPrimary',
-                'focus:outline-none focus:ring-2 focus:ring-purple-500/30',
-              )}
-            >
-              <option value="">Select Provider</option>
-              {Object.keys(PROVIDER_STATUS_URLS).map((provider) => (
-                <option key={provider} value={provider}>
-                  {provider}
-                </option>
-              ))}
-            </select>
-            <input
-              type="password"
-              value={testApiKey}
-              onChange={(e) => setTestApiKey(e.target.value)}
-              placeholder="Enter API key to test"
-              className={classNames(
-                'flex-1 px-3 py-1.5 rounded-lg text-sm',
-                'bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor',
-                'text-bolt-elements-textPrimary placeholder-bolt-elements-textTertiary',
-                'focus:outline-none focus:ring-2 focus:ring-purple-500/30',
-              )}
-            />
-            <button
-              onClick={() =>
-                testProvider && testApiKey && testApiKeyForProvider(testProvider as ProviderName, testApiKey)
-              }
-              disabled={!testProvider || !testApiKey || testingStatus === 'testing'}
-              className={classNames(
-                'px-4 py-1.5 rounded-lg text-sm',
-                'bg-purple-500 hover:bg-purple-600',
-                'text-white',
-                'transition-all duration-200',
-                'flex items-center gap-2',
-                !testProvider || !testApiKey || testingStatus === 'testing' ? 'opacity-50 cursor-not-allowed' : '',
-              )}
-            >
-              {testingStatus === 'testing' ? (
-                <>
-                  <div className="i-ph:spinner-gap w-4 h-4 animate-spin" />
-                  <span>Testing...</span>
-                </>
-              ) : (
-                <>
-                  <div className="i-ph:key w-4 h-4" />
-                  <span>Test Key</span>
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Status Grid */}
-        {loading && serviceStatuses.length === 0 ? (
-          <div className="text-center py-8 text-bolt-elements-textSecondary">Loading service statuses...</div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {serviceStatuses.map((service, index) => (
-              <motion.div
-                key={service.provider}
-                className={classNames(
-                  'bg-bolt-elements-background-depth-2',
-                  'hover:bg-bolt-elements-background-depth-3',
-                  'transition-all duration-200',
-                  'relative overflow-hidden rounded-lg',
-                )}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.1 }}
-                whileHover={{ scale: 1.02 }}
-              >
-                <div
-                  className={classNames('block p-4', service.statusUrl ? 'cursor-pointer' : '')}
-                  onClick={() => service.statusUrl && window.open(service.statusUrl, '_blank')}
-                >
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      {service.icon && (
-                        <div
-                          className={classNames(
-                            'w-8 h-8 flex items-center justify-center rounded-lg',
-                            'bg-bolt-elements-background-depth-3',
-                            getStatusColor(service.status),
-                          )}
-                        >
-                          {React.createElement(service.icon, {
-                            className: 'w-5 h-5',
-                          })}
-                        </div>
-                      )}
-                      <div>
-                        <h4 className="text-sm font-medium text-bolt-elements-textPrimary">{service.provider}</h4>
-                        <div className="space-y-1">
-                          <p className="text-xs text-bolt-elements-textSecondary">
-                            Last checked: {new Date(service.lastChecked).toLocaleTimeString()}
-                          </p>
-                          {service.responseTime && (
-                            <p className="text-xs text-bolt-elements-textTertiary">
-                              Response time: {Math.round(service.responseTime)}ms
-                            </p>
-                          )}
-                          {service.message && (
-                            <p className="text-xs text-bolt-elements-textTertiary">{service.message}</p>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    <div className={classNames('flex items-center gap-2', getStatusColor(service.status))}>
-                      <span className="text-sm capitalize">{service.status}</span>
-                      {getStatusIcon(service.status)}
-                    </div>
-                  </div>
-                  {service.incidents && service.incidents.length > 0 && (
-                    <div className="mt-2 border-t border-bolt-elements-borderColor pt-2">
-                      <p className="text-xs font-medium text-bolt-elements-textSecondary mb-1">Recent Incidents:</p>
-                      <ul className="text-xs text-bolt-elements-textTertiary space-y-1">
-                        {service.incidents.map((incident, i) => (
-                          <li key={i}>{incident}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-            ))}
-          </div>
+        key={`${service.provider}-${index}`}
+        className={classNames(
+          'rounded-lg border bg-bolt-elements-background-depth-2',
+          'hover:bg-bolt-elements-background-depth-3',
+          'transition-all duration-200',
+          getStatusColor(service.status),
         )}
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: index * 0.05 }}
+        whileHover={{ scale: 1.01 }}
+      >
+        <WithTooltip
+          tooltip={
+            <div>
+              <div className="font-medium">{service.provider} Status</div>
+              <div className="text-xs mt-1">Status: {getStatusText(service.status)}</div>
+              {service.responseTime && (
+                <div className="text-xs mt-1">Response Time: {Math.round(service.responseTime)}ms</div>
+              )}
+              {service.message && <div className="text-xs mt-1">Message: {service.message}</div>}
+              {service.statusUrl && <div className="text-xs mt-1">Click to visit status page</div>}
+            </div>
+          }
+          position="top"
+          maxWidth={300}
+        >
+          <div
+            className={classNames('block p-4', service.statusUrl ? 'cursor-pointer' : '')}
+            onClick={() => service.statusUrl && window.open(service.statusUrl, '_blank')}
+          >
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                {service.icon && (
+                  <div
+                    className={classNames(
+                      'w-8 h-8 flex items-center justify-center rounded-lg',
+                      'bg-bolt-elements-background-depth-3',
+                      getStatusColor(service.status),
+                    )}
+                  >
+                    {React.createElement(service.icon, {
+                      className: 'w-5 h-5',
+                    })}
+                  </div>
+                )}
+                <div>
+                  <h4 className="text-sm font-medium text-bolt-elements-textPrimary">{service.provider}</h4>
+                  <div className="space-y-1">
+                    <p className="text-xs text-bolt-elements-textSecondary">
+                      Last checked: {new Date(service.lastChecked).toLocaleTimeString()}
+                    </p>
+                    {service.responseTime && (
+                      <p className="text-xs text-bolt-elements-textTertiary">
+                        Response time: {Math.round(service.responseTime)}ms
+                      </p>
+                    )}
+                    {service.message && (
+                      <p className="text-xs text-bolt-elements-textTertiary">{service.message}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className={classNames('flex items-center')}>
+                {service.status === 'operational' && (
+                  <BsCheckCircleFill className="text-green-500 w-5 h-5" />
+                )}
+                {service.status === 'degraded' && (
+                  <BsExclamationCircleFill className="text-yellow-500 w-5 h-5" />
+                )}
+                {service.status === 'down' && <BsXCircleFill className="text-red-500 w-5 h-5" />}
+              </div>
+            </div>
+          </div>
+        </WithTooltip>
       </motion.div>
-    </div>
+    ));
+  };
+
+  return (
+    <RadixTooltip.Provider delayDuration={200}>
+      <div className="space-y-6">
+        <motion.div
+          className="space-y-4"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <div className="flex items-center justify-between gap-2 mt-8 mb-4">
+            <div className="flex items-center gap-2">
+              <div
+                className={classNames(
+                  'w-8 h-8 flex items-center justify-center rounded-lg',
+                  'bg-bolt-elements-background-depth-3',
+                  'text-purple-500',
+                )}
+              >
+                <TbActivityHeartbeat className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-md font-medium text-bolt-elements-textPrimary">Service Status</h4>
+                <p className="text-sm text-bolt-elements-textSecondary">
+                  Monitor and test the operational status of cloud LLM providers
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-bolt-elements-textSecondary">
+                Last updated: {lastRefresh.toLocaleTimeString()}
+              </span>
+              <button
+                onClick={() => fetchAllStatuses()}
+                className={classNames(
+                  'px-3 py-1.5 rounded-lg text-sm',
+                  'bg-bolt-elements-background-depth-3 hover:bg-bolt-elements-background-depth-4',
+                  'text-bolt-elements-textPrimary',
+                  'transition-all duration-200',
+                  'flex items-center gap-2',
+                  loading ? 'opacity-50 cursor-not-allowed' : '',
+                )}
+                disabled={loading}
+              >
+                <div className={`i-ph:arrows-clockwise w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                <span>{loading ? 'Refreshing...' : 'Refresh'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* API Key Test Section */}
+          <div className="p-4 bg-bolt-elements-background-depth-2 rounded-lg">
+            <h5 className="text-sm font-medium text-bolt-elements-textPrimary mb-2">Test API Key</h5>
+            <div className="flex gap-2">
+              <select
+                value={testProvider}
+                onChange={(e) => setTestProvider(e.target.value as ProviderName)}
+                className={classNames(
+                  'flex-1 px-3 py-1.5 rounded-lg text-sm max-w-[200px]',
+                  'bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor',
+                  'text-bolt-elements-textPrimary',
+                  'focus:outline-none focus:ring-2 focus:ring-purple-500/30',
+                )}
+              >
+                <option value="">Select Provider</option>
+                {Object.keys(PROVIDER_STATUS_URLS).map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="password"
+                value={testApiKey}
+                onChange={(e) => setTestApiKey(e.target.value)}
+                placeholder="Enter API key to test"
+                className={classNames(
+                  'flex-1 px-3 py-1.5 rounded-lg text-sm',
+                  'bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor',
+                  'text-bolt-elements-textPrimary placeholder-bolt-elements-textTertiary',
+                  'focus:outline-none focus:ring-2 focus:ring-purple-500/30',
+                )}
+              />
+              <button
+                onClick={() =>
+                  testProvider && testApiKey && testApiKeyForProvider(testProvider as ProviderName, testApiKey)
+                }
+                disabled={!testProvider || !testApiKey || testingStatus === 'testing'}
+                className={classNames(
+                  'px-4 py-1.5 rounded-lg text-sm',
+                  'bg-purple-500 hover:bg-purple-600',
+                  'text-white',
+                  'transition-all duration-200',
+                  'flex items-center gap-2',
+                  !testProvider || !testApiKey || testingStatus === 'testing' ? 'opacity-50 cursor-not-allowed' : '',
+                )}
+              >
+                {testingStatus === 'testing' ? (
+                  <>
+                    <div className="i-ph:spinner-gap w-4 h-4 animate-spin" />
+                    <span>Testing...</span>
+                  </>
+                ) : (
+                  <>
+                    <div className="i-ph:key w-4 h-4" />
+                    <span>Test Key</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Status Grid */}
+          {loading && serviceStatuses.length === 0 ? (
+            <div className="text-center py-8 text-bolt-elements-textSecondary">Loading service statuses...</div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {renderServiceItems()}
+            </div>
+          )}
+        </motion.div>
+      </div>
+    </RadixTooltip.Provider>
   );
 };
 

@@ -2,22 +2,34 @@ import { createCloudflareEnvironment } from './environments/cloudflare-environme
 import { createMemoryEnvironment } from './environments/memory-environment';
 import { createClientEnvironment } from './environments/client-environment';
 import type { EnvironmentManager } from './environments';
+import { EnvironmentType, StorageType } from './environments';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('environment-setup');
 
 // Singleton
-export let environment: EnvironmentManager;
+export let environment: EnvironmentManager | undefined;
 
 export function getEnvironmentInfo() {
   if (!environment) {
-    logger.warn('Environment not initialized yet');
-    return null;
+    // In development, initialize a default client environment rather than returning null
+    if (typeof window !== 'undefined' && (!process.env.NODE_ENV || process.env.NODE_ENV === 'development')) {
+      logger.warn('Environment not initialized yet, initializing client environment for development');
+      environment = createClientEnvironment();
+    } else {
+      logger.warn('Environment not initialized yet');
+      return {
+        type: 'unknown',
+        isProduction: false,
+        isClient: typeof window !== 'undefined'
+      };
+    }
   }
   
   return {
     type: environment.getEnvironmentType(),
     isProduction: environment.isProduction(),
+    isDevelopment: !environment.isProduction(),
     isClient: environment.isClient()
   };
 }
@@ -65,6 +77,14 @@ export function initEnvironmentWithContext(context?: any) {
   else {
     logger.info('Creating client environment');
     environment = createClientEnvironment();
+    
+    // Set window.__ENV__ for client-side access to environment variables 
+    if (typeof window !== 'undefined' && !window.__ENV__) {
+      window.__ENV__ = {
+        NODE_ENV: process.env.NODE_ENV || 'development',
+        ENVIRONMENT: 'local'
+      };
+    }
   }
 
   return environment;
@@ -76,27 +96,27 @@ export function getEnvironment(): EnvironmentManager {
     initEnvironmentWithContext();
   }
   
-  return environment;
+  return environment as EnvironmentManager;
 }
 
 // For testing and debugging
 export function resetEnvironment() {
   logger.info('Resetting environment');
-  environment = undefined as any;
+  environment = undefined;
 }
 
 /**
  * Helper to get environment variables with proper typing
  */
 export function getEnv<T = string>(key: string, defaultValue?: T): T | undefined {
-  return environment.getEnvVariable<T>(key, defaultValue);
+  return getEnvironment().getEnvVariable<T>(key, defaultValue);
 }
 
 /**
  * Helper to check if an environment variable exists
  */
 export function hasEnv(key: string): boolean {
-  return environment.hasEnvVariable(key);
+  return getEnvironment().hasEnvVariable(key);
 }
 
 /**
@@ -104,7 +124,7 @@ export function hasEnv(key: string): boolean {
  * Prioritizes persistent storage types when available
  */
 export function getBestStorageType(): StorageType {
-  const availableTypes = environment.getAvailableStorageTypes();
+  const availableTypes = getEnvironment().getAvailableStorageTypes();
 
   // Preferred storage types in order
   const preferredTypes = [
@@ -134,7 +154,7 @@ export async function storeValue<T>(key: string, value: T): Promise<void> {
   logger.debug(`Storing value with key "${key}" using storage type: ${storageType}`);
 
   try {
-    await environment.storeValue<T>(storageType, key, value);
+    await getEnvironment().storeValue<T>(storageType, key, value);
   } catch (error) {
     logger.error(`Failed to store value with key "${key}": ${error}`);
     throw error;
@@ -149,7 +169,7 @@ export async function retrieveValue<T>(key: string): Promise<T | null> {
   logger.debug(`Retrieving value with key "${key}" using storage type: ${storageType}`);
 
   try {
-    return await environment.retrieveValue<T>(storageType, key);
+    return await getEnvironment().retrieveValue<T>(storageType, key);
   } catch (error) {
     logger.error(`Failed to retrieve value with key "${key}": ${error}`);
     throw error;
@@ -164,7 +184,7 @@ export async function removeValue(key: string): Promise<void> {
   logger.debug(`Removing value with key "${key}" using storage type: ${storageType}`);
 
   try {
-    await environment.removeValue(storageType, key);
+    await getEnvironment().removeValue(storageType, key);
   } catch (error) {
     logger.error(`Failed to remove value with key "${key}": ${error}`);
     throw error;
@@ -175,7 +195,7 @@ export async function removeValue(key: string): Promise<void> {
  * Generate a unique ID using the environment's implementation
  */
 export function generateUniqueId(): string {
-  return environment.createUniqueId();
+  return getEnvironment().createUniqueId();
 }
 
 // Export the environment instance for advanced use cases

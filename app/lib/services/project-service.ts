@@ -132,7 +132,7 @@ export const ProjectService = {
   /**
    * Add requirements to a project
    */
-  async addRequirements(id: string, requirements: string, userId?: string): Promise<ProjectState> {
+  async addRequirements(id: string, requirements: string, userId?: string, isAdditionalRequirement?: boolean): Promise<ProjectState> {
     const projects = ProjectSyncService.getLocalProjects();
     
     if (!projects[id]) {
@@ -145,7 +145,10 @@ export const ProjectService = {
       id: uuidv4(),
       content: requirements,
       timestamp: Date.now(),
-      userId
+      userId,
+      metadata: {
+        isAdditionalRequirement: !!isAdditionalRequirement
+      }
     };
     
     project.requirements = [
@@ -162,7 +165,9 @@ export const ProjectService = {
     // Sync to backend
     try {
       await ProjectSyncService.syncProject(project);
-      logger.info(`Added requirements to project ${id} and synced`);
+      logger.info(`Added requirements to project ${id} and synced`, {
+        isAdditionalRequirement: !!isAdditionalRequirement
+      });
     } catch (error) {
       logger.error(`Failed to sync project ${id} after adding requirements:`, error);
       // Continue anyway - it will sync later

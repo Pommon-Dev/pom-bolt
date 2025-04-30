@@ -17,6 +17,7 @@ import { LocalProjectStorage } from './persistence/local';
 import { CloudflareProjectStorage } from './persistence/cloudflare';
 import { ProjectStorageService } from './persistence/storage-service';
 import type { EnhancedProjectState } from './enhanced-types';
+import { getErrorService } from '~/lib/services/error-service';
 
 const logger = createScopedLogger('project-state-manager');
 
@@ -65,13 +66,43 @@ export class ProjectStateManager {
     const environment = getEnvironment(context);
     const envInfo = environment.getInfo();
     
-    if (envInfo.type === EnvironmentType.CLOUDFLARE && context?.cloudflare) {
-      const { DB, FILE_STORAGE, CACHE_STORAGE } = context.cloudflare.env;
-      
-      if (DB && FILE_STORAGE && CACHE_STORAGE) {
-        logger.info('Creating enhanced storage service with D1 and KV');
-        return new ProjectStorageService(DB, FILE_STORAGE, CACHE_STORAGE);
+    // Log the context structure for debugging
+    logger.debug('Enhanced storage context check:', {
+      envType: envInfo.type,
+      hasCloudflare: !!context?.cloudflare,
+      hasCfEnv: !!context?.cloudflare?.env,
+      d1Available: !!context?.cloudflare?.env?.DB,
+      kvProjectsAvailable: !!context?.cloudflare?.env?.POM_BOLT_PROJECTS,
+      kvFilesAvailable: !!context?.cloudflare?.env?.POM_BOLT_FILES,
+      kvCacheAvailable: !!context?.cloudflare?.env?.POM_BOLT_CACHE
+    });
+    
+    // Check for Cloudflare environment (server-side)
+    if (typeof window === 'undefined') {
+      if (context?.cloudflare?.env) {
+        const { DB, POM_BOLT_PROJECTS, POM_BOLT_FILES, POM_BOLT_CACHE } = context.cloudflare.env;
+        
+        // Create enhanced storage service if DB and at least the main KV namespace is available
+        if (DB && POM_BOLT_PROJECTS) {
+          logger.info('Creating enhanced storage service with D1 and KV (server-side)');
+          
+          // Use the correct number of parameters based on the ProjectStorageService constructor
+          return new ProjectStorageService(
+            DB, 
+            POM_BOLT_PROJECTS, 
+            POM_BOLT_CACHE || POM_BOLT_PROJECTS // Use cache KV or fallback to main KV
+          );
+        }
       }
+    } 
+    // For local development, check if we can still use D1/KV on client side
+    // This is only for development, won't be used in production
+    else if (envInfo.type === EnvironmentType.LOCAL && process.env.NODE_ENV === 'development') {
+      // In development, we can try to use the worker bindings through fetch API
+      logger.info('Running in local development mode, using API for storage');
+      
+      // Return null to use the API through fetch
+      return null;
     }
     
     logger.info('Enhanced storage service not available, using legacy storage adapter');
@@ -162,15 +193,31 @@ export class ProjectStateManager {
         project = await this.storageAdapter.getProject(id);
       }
       
+      // If project is not found
+      if (!project) {
+        logger.warn(`Project ${id} not found`, { tenantId: tenantId || 'none' });
+        // We return null rather than throwing to allow graceful handling by caller
+        return null;
+      }
+      
       // If project is found and tenant validation is requested
-      if (project && tenantId) {
+      if (tenantId) {
         // If project has a tenant ID and it doesn't match the requested tenant ID
         if (project.tenantId && project.tenantId !== tenantId) {
+          const errorService = getErrorService();
           logger.warn('Tenant access denied', {
             projectId: id,
             projectTenant: project.tenantId,
             requestTenant: tenantId
           });
+          
+          // We return null rather than throwing to allow graceful handling by caller
+          // but we log a more detailed error
+          errorService.logError(
+            errorService.createTenantAccessDeniedError(id, tenantId),
+            { source: 'state-manager.getProject' }
+          );
+          
           return null; // Return null to indicate project not found or not accessible
         }
       }
@@ -183,7 +230,15 @@ export class ProjectStateManager {
       });
       return project;
     } catch (error) {
+      const errorService = getErrorService();
       logger.error(`Error getting project ${id}:`, error);
+      
+      // Log a standardized error
+      errorService.logError(
+        errorService.normalizeError(error, `Failed to retrieve project ${id}`),
+        { projectId: id, tenantId, source: 'state-manager.getProject' }
+      );
+      
       throw error;
     }
   }
@@ -202,7 +257,15 @@ export class ProjectStateManager {
         return exists;
       }
     } catch (error) {
+      const errorService = getErrorService();
       logger.error(`Error checking if project ${id} exists:`, error);
+      
+      // Log a standardized error
+      errorService.logError(
+        errorService.normalizeError(error, `Failed to check if project ${id} exists`),
+        { projectId: id, source: 'state-manager.projectExists' }
+      );
+      
       throw error;
     }
   }

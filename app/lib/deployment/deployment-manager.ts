@@ -29,6 +29,7 @@ export interface DeploymentManagerOptions {
   cloudflareConfig?: CloudflareConfig;
   netlifyToken?: string;
   githubToken?: string;
+  githubOwner?: string;
 }
 
 /**
@@ -38,7 +39,6 @@ export interface DeploymentManagerOptions {
 export class DeploymentManager {
   private targets: Map<string, DeploymentTarget> = new Map();
   private preferredTargets: string[] = [];
-  private storageService = getProjectStorageService();
   
   // Make constructor private to force initialization via static create method
   private constructor(options?: DeploymentManagerOptions) {
@@ -97,7 +97,7 @@ export class DeploymentManager {
 
       if (netlifyToken) {
         logger.info('Attempting to register Netlify deployment target (Token found)');
-        const netlifyTarget = new NetlifyTarget({ apiToken: netlifyToken });
+        const netlifyTarget = new NetlifyTarget({ token: netlifyToken });
         logger.debug('NetlifyTarget instantiated. Calling isAvailable()...');
         try {
           const isAvailable = await netlifyTarget.isAvailable();
@@ -150,8 +150,11 @@ export class DeploymentManager {
           githubOwner: githubCreds.owner 
         });
         
-        logger.debug('NetlifyGitHubTarget instantiated with configuration:');
-        netlifyGithubTarget.logDebugInfo();
+        logger.debug('NetlifyGitHubTarget instantiated with configuration:', {
+          hasNetlifyToken: !!netlifyToken,
+          hasGithubToken: !!githubToken,
+          hasGithubOwner: !!githubCreds.owner
+        });
         
         logger.debug('NetlifyGitHubTarget instantiated. Calling isAvailable()...');
         try {
@@ -228,9 +231,9 @@ export class DeploymentManager {
     try {
       const localZipTarget = new LocalZipTarget();
       this.registerTarget('local-zip', localZipTarget);
-      logger.debug('Local ZIP deployment target registered');
+      logger.debug('Registered local-zip fallback target');
     } catch (error) {
-      logger.error('Failed to register local ZIP deployment target:', error);
+      logger.warn('Failed to register local-zip fallback target:', error);
     }
   }
   
@@ -273,9 +276,19 @@ export class DeploymentManager {
    * Select the best deployment target based on preferences and availability
    */
   async selectBestTarget(preferredTarget?: string): Promise<string> {
+    logger.debug('Selecting best deployment target', { 
+      preferredTarget: preferredTarget || 'none',
+      preferredTargetsList: this.preferredTargets.join(',')
+    });
+    
     const availableTargets = await this.getAvailableTargets();
+    logger.info('Available deployment targets for selection:', { 
+      available: availableTargets.join(', '),
+      count: availableTargets.length 
+    });
     
     if (availableTargets.length === 0) {
+      logger.error('No deployment targets available');
       throw this.createError(
         DeploymentErrorType.NOT_AVAILABLE,
         'No deployment targets available'
@@ -284,17 +297,20 @@ export class DeploymentManager {
     
     // If a preferred target is specified and available, use it
     if (preferredTarget && availableTargets.includes(preferredTarget)) {
+      logger.info(`Using explicitly requested target: ${preferredTarget}`);
       return preferredTarget;
     }
     
     // Find the first available target from the preferred list
     for (const target of this.preferredTargets) {
       if (availableTargets.includes(target)) {
+        logger.info(`Selected best available target: ${target}`);
         return target;
       }
     }
     
     // Fall back to the first available target
+    logger.info(`Falling back to first available target: ${availableTargets[0]}`);
     return availableTargets[0];
   }
   
@@ -317,6 +333,7 @@ export class DeploymentManager {
       const requestedTarget = this.targets.get(options.targetName);
       
       if (requestedTarget) {
+        logger.debug(`Found requested target: ${options.targetName}`);
         try {
           const isAvailable = await requestedTarget.isAvailable();
           if (isAvailable) {
@@ -342,7 +359,7 @@ export class DeploymentManager {
           logger.error(`Error with requested target ${options.targetName}:`, error);
         }
       } else {
-        logger.warn(`Requested target ${options.targetName} is not registered`);
+        logger.warn(`Requested target ${options.targetName} is not registered. Available targets: ${Array.from(this.targets.keys()).join(', ')}`);
       }
     }
     
@@ -352,16 +369,35 @@ export class DeploymentManager {
     
     const target = this.targets.get(targetName);
     if (!target) {
+      logger.error(`Selected target ${targetName} not found in registered targets: ${Array.from(this.targets.keys()).join(', ')}`);
       throw new Error(`Deployment target ${targetName} not available`);
     }
     
-    // Deploy the project
-    return target.deploy({
-      projectId: options.projectId,
-      projectName: options.projectName || options.projectId,
-      files: options.files,
-      metadata: options.metadata
+    logger.debug(`Deploying with target ${targetName}`, {
+      targetType: target.getProviderType(),
+      githubInfo: options.metadata?.github ? 'present' : 'missing',
+      projectId: options.projectId
     });
+    
+    // Deploy the project
+    try {
+      const result = await target.deploy({
+        projectId: options.projectId,
+        projectName: options.projectName || options.projectId,
+        files: options.files,
+        metadata: options.metadata
+      });
+      
+      logger.info(`Deployment completed with status: ${result.status}`, {
+        provider: result.provider,
+        url: result.url || 'none'
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error(`Deployment failed with target ${targetName}:`, error);
+      throw error;
+    }
   }
   
   /**
@@ -374,11 +410,28 @@ export class DeploymentManager {
     projectId?: string;
     metadata?: Record<string, any>;
   }): Promise<DeploymentResult> {
+    // Log the original request options
+    logger.debug('deployWithBestTarget called with options:', {
+      requestedTarget: options.targetName || 'auto',
+      projectId: options.projectId,
+      hasGithubInfo: !!options.metadata?.github
+    });
+    
     // Select the best target
     const targetName = await this.selectBestTarget(options.targetName);
     const target = this.targets.get(targetName)!;
     
-    logger.info(`Selected deployment target: ${targetName}`);
+    logger.info(`🎯 Selected deployment target: ${targetName}`, {
+      requestedTarget: options.targetName || 'auto',
+      registeredTargets: Array.from(this.targets.keys()).join(',')
+    });
+    
+    // Log the target's details
+    logger.debug(`Target details:`, {
+      name: target.getName(),
+      provider: target.getProviderType(),
+      hasGithubInfo: !!options.metadata?.github
+    });
     
     // If a projectId is provided, deploy directly
     if (options.projectId) {
@@ -386,6 +439,7 @@ export class DeploymentManager {
         projectId: options.projectId,
         projectName: options.projectName,
         files: options.files,
+        targetName,  // Use selected target, not original options.targetName
         metadata: options.metadata
       });
     }
@@ -427,12 +481,17 @@ export class DeploymentManager {
   /**
    * Create a standard deployment error
    */
-  private createError(type: DeploymentErrorType, message: string, originalError?: Error): Error {
+  private createError(type: DeploymentErrorType, message: string, originalError?: Error, validationErrors?: string[]): Error {
     const error = new Error(message);
     error.name = type;
     
     if (originalError) {
       (error as any).originalError = originalError;
+    }
+    
+    if (validationErrors && validationErrors.length > 0) {
+      (error as any).validationErrors = validationErrors;
+      (error as any).isValidationError = true;
     }
     
     return error;
@@ -442,7 +501,11 @@ export class DeploymentManager {
    * Get a specific deployment target by name
    */
   public getTarget(targetName: string): DeploymentTarget | null {
-    return this.targets.get(targetName) || null;
+    const target = this.targets.get(targetName) || null;
+    if (!target) {
+      logger.warn(`Deployment target '${targetName}' not found among registered targets: ${Array.from(this.targets.keys()).join(', ')}`);
+    }
+    return target;
   }
 
   private async initializeTargets(options: DeploymentManagerOptions): Promise<void> {
@@ -484,17 +547,23 @@ export class DeploymentManager {
 
     // Initialize Netlify target if token is available
     if (options.netlifyToken) {
+      logger.debug('Registering Netlify target with token', { tokenLength: options.netlifyToken.length });
       const netlifyTarget = new NetlifyTarget({
-        apiToken: options.netlifyToken
+        token: options.netlifyToken  // NetlifyTarget constructor expects 'token', not 'apiToken'
       });
       this.targets.set('netlify', netlifyTarget);
     }
 
     // Initialize Netlify GitHub target if both tokens are available
     if (options.netlifyToken && options.githubToken) {
+      logger.debug('Registering Netlify-GitHub target with tokens', { 
+        netlifyTokenLength: options.netlifyToken.length,
+        githubTokenLength: options.githubToken.length 
+      });
       const netlifyGitHubTarget = new NetlifyGitHubTarget({
         netlifyToken: options.netlifyToken,
-        githubToken: options.githubToken
+        githubToken: options.githubToken,
+        githubOwner: options.githubOwner
       });
       this.targets.set('netlify-github', netlifyGitHubTarget);
     }
@@ -510,6 +579,110 @@ export class DeploymentManager {
       targets: Array.from(this.targets.keys()),
       preferredTargets: this.preferredTargets
     });
+  }
+
+  /**
+   * Initialize a project with the given deployment target
+   */
+  private async initializeProject(target: DeploymentTarget, options: {
+    projectId: string;
+    projectName?: string;
+    metadata?: Record<string, any>;
+  }): Promise<ProjectMetadata> {
+    const projectName = options.projectName || options.projectId;
+    
+    // Check if the project has already been initialized with this target
+    try {
+      const projectExists = await target.projectExists(options.projectId);
+      if (projectExists) {
+        // Return existing project metadata
+        const existingProject = {
+          id: options.projectId,
+          name: projectName,
+          provider: target.getProviderType(),
+          url: '', // This would need to be retrieved from the target
+          metadata: options.metadata || {}
+        };
+        return existingProject;
+      }
+    } catch (error) {
+      logger.warn(`Error checking if project exists: ${error}`);
+      // Continue to initialization
+    }
+    
+    // Initialize the project with the target
+    return await target.initializeProject({
+      name: projectName,
+      metadata: options.metadata
+    });
+  }
+
+  /**
+   * Validate credentials for a deployment target using ConfigValidator
+   */
+  public async validateCredentials(targetName: string, credentials: any, tenantId?: string): Promise<{
+    valid: boolean;
+    errors: string[];
+    warnings: string[];
+  }> {
+    const { getConfigValidator } = await import('~/lib/services/config-validator');
+    const configValidator = getConfigValidator();
+    let result: { valid: boolean; errors: string[]; warnings: string[] } = { 
+      valid: false, 
+      errors: ['Unknown target type'], 
+      warnings: [] 
+    };
+
+    // Validate based on target type
+    if (targetName === 'cloudflare-pages' && credentials.cloudflare) {
+      const validationResult = configValidator.validateCloudflareConfig({
+        ...credentials.cloudflare,
+        tenantId: credentials.cloudflare.tenantId || tenantId
+      });
+      result = {
+        valid: validationResult.valid,
+        errors: validationResult.errors,
+        warnings: validationResult.warnings
+      };
+    } else if (targetName === 'netlify' && credentials.netlify) {
+      const validationResult = configValidator.validateNetlifyConfig({
+        ...credentials.netlify,
+        tenantId: credentials.netlify.tenantId || tenantId
+      });
+      result = {
+        valid: validationResult.valid,
+        errors: validationResult.errors,
+        warnings: validationResult.warnings
+      };
+    } else if (targetName === 'netlify-github') {
+      // For combined targets, validate each part
+      const netlifyResult = credentials.netlify ? 
+        configValidator.validateNetlifyConfig({
+          ...credentials.netlify,
+          tenantId: credentials.netlify.tenantId || tenantId
+        }) : 
+        { valid: false, errors: ['Netlify credentials missing'], warnings: [] as string[] };
+      
+      const githubResult = credentials.github ? 
+        configValidator.validateGitHubConfig({
+          ...credentials.github,
+          tenantId: credentials.github.tenantId || tenantId
+        }) : 
+        { valid: false, errors: ['GitHub credentials missing'], warnings: [] as string[] };
+      
+      // Combine results
+      result = {
+        valid: netlifyResult.valid && githubResult.valid,
+        errors: [...netlifyResult.errors, ...githubResult.errors],
+        warnings: [...netlifyResult.warnings, ...githubResult.warnings]
+      };
+    }
+    
+    if (!result.valid) {
+      logger.warn(`Credential validation failed for ${targetName}:`, { errors: result.errors });
+    }
+    
+    return result;
   }
 }
 

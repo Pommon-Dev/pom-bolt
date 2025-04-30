@@ -65,6 +65,7 @@ export interface ProjectState {
   currentDeploymentId?: string; // ID of the current active deployment
   metadata?: Record<string, any>; // Additional metadata about this project
   webhooks?: any[]; // Webhooks associated with this project
+  tenantId?: string; // ID of the tenant that owns this project
 }
 
 /**
@@ -114,6 +115,7 @@ export interface CreateProjectOptions {
   initialRequirements?: string; // Initial requirements for the project
   userId?: string;      // Optional ID of the user creating the project
   metadata?: Record<string, any>; // Additional metadata about the project
+  tenantId?: string;    // ID of the tenant that will own the project
 }
 
 /**

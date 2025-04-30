@@ -1,86 +1,109 @@
-# Cloudflare Pages Configuration
-# This file configures how your application is deployed to Cloudflare Pages
+# Cloudflare Configuration
+# This file configures deployment to Cloudflare Pages and Workers
 
-#:schema node_modules/wrangler/config-schema.json
 name = "pom-bolt"
 
 # Enable Node.js compatibility mode for Cloudflare Workers
 compatibility_flags = ["nodejs_compat"]
 
 # Set the compatibility date for Cloudflare Workers features
-compatibility_date = "2024-10-01"
+compatibility_date = "2023-09-22"
 
-# Specify the directory containing the built client files
-pages_build_output_dir = "./build/client"
+# Cloudflare Pages configuration
+# This is the directory where your built client files are located
+# The directory that wrangler pages deploy will use
+build = { command = "npm run build", output_dir = "build/client" }
 
 # Enable metrics collection for monitoring
 send_metrics = true
 
-# D1 Database for project metadata
+# Main D1 database configuration (for local development)
 [[d1_databases]]
 binding = "DB"
 database_name = "pom-bolt-db"
-database_id = "f266f4f7-7225-4f31-bcc7-c5010481f263" # Replace with your actual database ID
-# The preview_database_id will be different when deployed as a preview
-# database_id = "your-production-d1-database-id"
+database_id = "3fb97009-64bf-4d52-b7f5-88075da00a87"
 
-# KV Namespaces
+# Main KV namespace bindings (for local development)
+[[kv_namespaces]]
+binding = "PROJECTS_DATA"
+id = "caf7bebb43804df4a5b95a1b1da2aaa4"
+
 [[kv_namespaces]]
 binding = "POM_BOLT_PROJECTS"
-id = "dfe2d0d711d8469298b9ebe3c4d5f596" # Replace with your actual KV namespace ID
-# preview_id = "your-preview-kv-namespace-id"
-# id = "your-production-kv-namespace-id"
+id = "caf7bebb43804df4a5b95a1b1da2aaa4"
 
 [[kv_namespaces]]
 binding = "POM_BOLT_FILES"
-id = "505f6c673aa64c7dba8170749caddbdb"
+id = "dbe1a024a7ba47229c2bf76597025c6a"
 
 [[kv_namespaces]]
 binding = "POM_BOLT_CACHE"
-id = "43bb1fedfd1d48149cda681c60db13b9"
+id = "3fc3d45060c04a2c911853ea7faf63eb"
 
-# Environment variables for local development only
-# DO NOT include API keys or tokens here - use Cloudflare Dashboard instead
+# Variables for local development
 [vars]
+NODE_ENV = "development"
 DEFAULT_LLM_PROVIDER = "openai"
-DEFAULT_LLM_MODEL = "gpt-4o"
+DEFAULT_LLM_MODEL = "o3-mini"
+MULTI_TENANT_ENABLED = "true"
+DEFAULT_TENANT_ID = "default"
+STRICT_TENANT_VALIDATION = "false"
+SEARCH_INDEX_ENABLED = "true"
+CACHE_TTL = "300"
+MAX_FILE_CHUNK_SIZE = "1048576"
 
+# Production environment configuration
 [env.production]
 # Define environment variables for production
-NODE_ENV = "production"
-ENVIRONMENT = "production"
-SEARCH_INDEX_ENABLED = "true"
-CACHE_TTL = "3600"
-MAX_FILE_CHUNK_SIZE = "1048576"
+vars = { NODE_ENV = "production", ENVIRONMENT = "production", SEARCH_INDEX_ENABLED = "true", CACHE_TTL = "3600", MAX_FILE_CHUNK_SIZE = "1048576", MULTI_TENANT_ENABLED = "true", DEFAULT_TENANT_ID = "default", STRICT_TENANT_VALIDATION = "true", DEFAULT_LLM_PROVIDER = "openai", DEFAULT_LLM_MODEL = "gpt-4o" }
 
-# Preview environment settings
+# Production-specific D1 database
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "pom-bolt-db"
+database_id = "3fb97009-64bf-4d52-b7f5-88075da00a87"
+
+# Production-specific KV namespaces
+[[env.production.kv_namespaces]]
+binding = "PROJECTS_DATA"
+id = "caf7bebb43804df4a5b95a1b1da2aaa4"
+
+[[env.production.kv_namespaces]]
+binding = "POM_BOLT_PROJECTS"
+id = "caf7bebb43804df4a5b95a1b1da2aaa4"
+
+[[env.production.kv_namespaces]]
+binding = "POM_BOLT_FILES"
+id = "dbe1a024a7ba47229c2bf76597025c6a"
+
+[[env.production.kv_namespaces]]
+binding = "POM_BOLT_CACHE"
+id = "3fc3d45060c04a2c911853ea7faf63eb"
+
+# Preview environment configuration
 [env.preview]
 # Define environment variables for preview
-NODE_ENV = "production" 
-ENVIRONMENT = "preview"
-SEARCH_INDEX_ENABLED = "true"
-CACHE_TTL = "3600"
-MAX_FILE_CHUNK_SIZE = "1048576"
+vars = { NODE_ENV = "production", ENVIRONMENT = "preview", SEARCH_INDEX_ENABLED = "true", CACHE_TTL = "1800", MAX_FILE_CHUNK_SIZE = "1048576", MULTI_TENANT_ENABLED = "true", DEFAULT_TENANT_ID = "preview", STRICT_TENANT_VALIDATION = "false", DEFAULT_LLM_PROVIDER = "openai", DEFAULT_LLM_MODEL = "o3-mini" }
 
-# Non-sensitive environment variables for preview env
-[env.preview.vars]
-DEFAULT_LLM_PROVIDER = "openai"
-DEFAULT_LLM_MODEL = "gpt-4o"
+# Preview-specific D1 database with unique ID
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "pom-bolt-db-preview"
+database_id = "e75ef667-51ed-490c-b2cd-0f6c1f11412f"
 
-# Add KV binding to preview environment
+# Preview-specific KV namespaces
+[[env.preview.kv_namespaces]]
+binding = "PROJECTS_DATA"
+id = "5e84ef01c7f84a35b86aaa6da7f1c6ad"
+
 [[env.preview.kv_namespaces]]
 binding = "POM_BOLT_PROJECTS"
-id = "dfe2d0d711d8469298b9ebe3c4d5f596"
+id = "a452d9d552394ea59d3588498689aec5"
 
 [[env.preview.kv_namespaces]]
 binding = "POM_BOLT_FILES"
-id = "505f6c673aa64c7dba8170749caddbdb"
+id = "dbe1a024a7ba47229c2bf76597025c6a"
 
 [[env.preview.kv_namespaces]]
 binding = "POM_BOLT_CACHE"
-id = "43bb1fedfd1d48149cda681c60db13b9"
-
-[[env.preview.d1_databases]]
-binding = "DB"
-database_name = "pom_bolt_metadata"
-database_id = "f266f4f7-7225-4f31-bcc7-c5010481f263"
+id = "3fc3d45060c04a2c911853ea7faf63eb"

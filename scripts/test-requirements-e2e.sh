@@ -10,15 +10,55 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Get the environment from the first argument
+ENVIRONMENT=${1:-"local"}
+
+# Set API base URL based on environment
+case "$ENVIRONMENT" in
+  "local")
+    API_BASE_URL="http://localhost:5173"
+    ;;
+  "preview")
+    API_BASE_URL="https://persistence-deploy.pom-bolt.pages.dev"
+    ;;
+  "prod" | "production")
+    API_BASE_URL="https://pom-bolt.com"
+    ;;
+  *)
+    echo -e "${RED}Invalid environment: $ENVIRONMENT${NC}"
+    echo -e "Usage: $0 [local|preview|prod] [tenant_id] [--github] [--deploy] [--full]"
+    exit 1
+    ;;
+esac
+
+# Get tenant ID from the second argument (or default)
+TENANT_ID=${2:-"default"}
+
+# Parse additional options
+SETUP_GITHUB=false
+SHOULD_DEPLOY=false
+for arg in "$@"; do
+  case $arg in
+    --github)
+      SETUP_GITHUB=true
+      ;;
+    --deploy)
+      SHOULD_DEPLOY=true
+      ;;
+    --full)
+      SETUP_GITHUB=true
+      SHOULD_DEPLOY=true
+      ;;
+  esac
+done
+
 # Configuration
-# API_BASE_URL=${1:-"http://localhost:5173"}
-API_BASE_URL=${1:-"https://persistence-deploy.pom-bolt.pages.dev"}
 GITHUB_TOKEN=${GITHUB_TOKEN:-""}
 GITHUB_OWNER=${GITHUB_OWNER:-""}
 # Check for both possible Netlify token env var names
 NETLIFY_TOKEN=${NETLIFY_TOKEN:-${NETLIFY_AUTH_TOKEN:-""}}
 # Debug mode for verbose output
-DEBUG=${DEBUG:-false}
+DEBUG=${DEBUG:-true}
 
 # Banner
 echo -e "${BLUE}===============================================${NC}"
@@ -53,15 +93,20 @@ debug_token() {
   fi
 }
 
-# Check for required credentials
-if [ -z "$GITHUB_TOKEN" ] || [ -z "$GITHUB_OWNER" ] || [ -z "$NETLIFY_TOKEN" ]; then
-  echo -e "${YELLOW}Warning: Missing some credentials. Please set environment variables:${NC}"
+# Check for required credentials based on options
+if [ "$SETUP_GITHUB" = true ] && [ -z "$GITHUB_TOKEN" -o -z "$GITHUB_OWNER" ]; then
+  echo -e "${RED}Error: GitHub setup is enabled but credentials are missing. Please set:${NC}"
   [ -z "$GITHUB_TOKEN" ] && echo "  - GITHUB_TOKEN"
   [ -z "$GITHUB_OWNER" ] && echo "  - GITHUB_OWNER"
-  [ -z "$NETLIFY_TOKEN" ] && echo "  - NETLIFY_TOKEN"
-  
-  echo -e "${YELLOW}The test will still run but may not include GitHub and Netlify deployment.${NC}"
-  echo ""
+  echo -e "${RED}Aborting test as GitHub credentials are required for GitHub setup.${NC}"
+  exit 1
+fi
+
+if [ "$SHOULD_DEPLOY" = true ] && [ -z "$NETLIFY_TOKEN" ]; then
+  echo -e "${RED}Error: Deployment is enabled but Netlify token is missing. Please set:${NC}"
+  echo "  - NETLIFY_TOKEN or NETLIFY_AUTH_TOKEN"
+  echo -e "${RED}Aborting test as Netlify token is required for deployment.${NC}"
+  exit 1
 fi
 
 # More detailed credentials debugging
@@ -75,10 +120,18 @@ fi
 
 # Configuration output
 echo -e "${BLUE}Test Configuration:${NC}"
+echo -e "Environment: ${ENVIRONMENT}"
 echo -e "API Base URL: ${API_BASE_URL}"
-echo -e "GitHub Owner: ${GITHUB_OWNER:-'(Not provided)'}"
-echo -e "GitHub Token: ${GITHUB_TOKEN:0:5}...${GITHUB_TOKEN:(-5)}${NC}" 2>/dev/null || echo -e "(Not provided)${NC}"
-echo -e "Netlify Token: ${NETLIFY_TOKEN:0:5}...${NETLIFY_TOKEN:(-5)}${NC}" 2>/dev/null || echo -e "(Not provided)${NC}"
+echo -e "Tenant ID: ${TENANT_ID}"
+echo -e "Setup GitHub: ${SETUP_GITHUB}"
+echo -e "Deploy: ${SHOULD_DEPLOY}"
+if [ "$SETUP_GITHUB" = true ]; then
+  echo -e "GitHub Owner: ${GITHUB_OWNER}"
+  echo -e "GitHub Token: ${GITHUB_TOKEN:0:4}...${GITHUB_TOKEN:(-4)}" 2>/dev/null || echo -e "(Not provided)"
+fi
+if [ "$SHOULD_DEPLOY" = true ]; then
+  echo -e "Netlify Token: ${NETLIFY_TOKEN:0:4}...${NETLIFY_TOKEN:(-4)}" 2>/dev/null || echo -e "(Not provided)"
+fi
 echo ""
 
 # Function to create a random project name
@@ -96,160 +149,70 @@ check_url() {
 echo -e "${GREEN}Step 1: Submitting requirements to generate a project...${NC}"
 
 PROJECT_NAME=$(random_project_name)
-# REQUIREMENTS="Create a simple landing page for a coffee shop called ${PROJECT_NAME}. The page should have a header with a logo and navigation menu, a hero section with a welcome message and a call-to-action button, a section showcasing the coffee menu with prices, and a footer with contact information and social media links."
-REQUIREMENTS="Create detailed components with these requirements:
-1. Use 'use client' directive for client-side components
-2. Style with Tailwind CSS utility classes for responsive design
-3. Use Lucide React for icons (from lucide-react package). Do NOT use other UI libraries unless requested
-4. Use stock photos from picsum.photos where appropriate, only valid URLs you know exist
-5. Configure next.config.js image remotePatterns to enable stock photos from picsum.photos
-6. Create root layout.tsx page that wraps necessary navigation items to all pages
-7. MUST implement the navigation elements items in their rightful place i.e. Left sidebar, Top header
-8. Accurately implement necessary grid layouts
-9. Follow proper import practices:
-   - Use @/ path aliases
-   - Keep component imports organized
-   - Update current src/app/page.tsx with new comprehensive code
-   - Don't forget root route (page.tsx) handling
-   - You MUST complete the entire prompt before stopping
-<summary_title>
-Coffee Brand Landing Page
-</summary_title>
-<image_analysis>
-1. Navigation Elements:
-   - Shop Now button: A primary call-to-action button, likely linking to the product catalog or store page.
-   - Learn Our Story button: A secondary call-to-action button, presumably linking to the brand's about page or story.
-2. Layout Components:
-   - Hero Section: Contains the main headline, subheadline, and call-to-action buttons, along with a background image of coffee being poured into a mug.
-   - Product Section: Displays three coffee roast options (Light, Medium, Dark) with corresponding descriptions and images of the coffee bags.
-   - Features Section: Highlights key features such as \"Ethically Sourced Beans,\" \"Small Batch Roasting,\" and \"Fresh to Your Door in 3 Days\" with corresponding icons.
-   - Testimonial Section: Includes a customer quote and a headshot of the customer.
-3. Content Sections:
-   - Headline: 'Brew Bold. Live Smooth.'
-   - Subheadline: Exceptional coffee. Sustainably sourced. Roasted to perfection.
-   - Product Titles: Light Roast, Medium Roast, Dark Roast.
-   - Product Descriptions: Bright & Citrus, Balanced & Nutty, 'Bold & Smoky.'
-   - Feature Titles: Ethically Sourced Beans, Small Batch Roasting, Fresh to Your Door in 3 Days.
-   - Testimonial: This is hands-down the best coffee I've ever had.
-4. Interactive Controls:
-   - Shop Now button: Navigates to the product page.
-   - Learn Our Story button: Navigates to the about page.
-   - Coffee Roast Options: Likely clickable, potentially leading to individual product pages or adding the item to a cart.
-5. Colors:
-   - Primary Colors: Dark brown/black (for text and buttons), off-white/beige (for background and mug).
-   - Accent Colors: Yellow, orange, and dark brown for the roast labels.
-6. Grid/Layout Structure:
-   - The page appears to use a multi-section layout with a clear hierarchy.
-   - The hero section takes up the top portion of the page.
-   - The product section is likely a horizontal grid with three columns.
-   - The features section is a horizontal grid with three columns.
-   - The testimonial section is at the bottom.
-</image_analysis>
-<development_planning>
-1. Project Structure:
-   - app/: Contains the main application code.
-     - components/: Reusable UI components.
-       - HeroSection.tsx: Hero section with headline, subheadline, and buttons.
-       - ProductCard.tsx: Reusable component for displaying each coffee roast option.
-       - FeatureItem.tsx: Reusable component for displaying each feature with its icon.
-       - Testimonial.tsx: Component for displaying the customer testimonial.
-     - assets/: Contains images and other static assets.
-       - images/:
-         - coffee-pouring.jpg: Background image for the hero section.
-         - light-roast.jpg: Image for the light roast coffee.
-         - medium-roast.jpg: Image for the medium roast coffee.
-         - dark-roast.jpg: Image for the dark roast coffee.
-         - ethically-sourced.svg: Icon for ethically sourced beans.
-         - small-batch.svg: Icon for small batch roasting.
-         - fresh-delivery.svg: Icon for fresh delivery.
-         - customer-headshot.jpg: Image for the customer testimonial.
-     - page.tsx: Main page component that renders all sections.
-2. Key Features:
-   - Hero section with compelling headline and call-to-action buttons.
-   - Product display with visually appealing coffee roast options.
-   - Feature highlights with relevant icons.
-   - Customer testimonial to build trust.
-   - Responsive design for optimal viewing on different devices.
-3. State Management:
-   - No specific state management is required for this static landing page.
-4. Routes:
-   - /: The main landing page.
-5. Component Architecture:
-   - The page is composed of several reusable components: HeroSection, ProductCard, FeatureItem, Testimonial\" 
-   "
+REQUIREMENTS="Create a simple landing page for a coffee shop called ${PROJECT_NAME}. The page should have a header with a logo and navigation menu, a hero section with a welcome message and a call-to-action button, a section showcasing the coffee menu with prices, and a footer with contact information and social media links."
 
 echo -e "${YELLOW}Project name: $PROJECT_NAME${NC}"
 echo -e "${YELLOW}Requirements:${NC} $REQUIREMENTS"
 
-# Create a temporary file for the JSON payload
-PAYLOAD_FILE=$(mktemp)
-
-# Configuration for deployment
-SHOULD_DEPLOY=false
-DEPLOY_SECTION=""
-
-if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_OWNER" ] && [ -n "$NETLIFY_TOKEN" ]; then
-  SHOULD_DEPLOY=true
-  DEPLOY_SECTION='"shouldDeploy": true,
-    "deploymentTarget": "netlify-github",
-    "setupGitHub": true,
-    "githubCredentials": {
-      "token": "'"$GITHUB_TOKEN"'",
-      "owner": "'"$GITHUB_OWNER"'"
-    },
-    "netlifyCredentials": {
-      "apiToken": "'"$NETLIFY_TOKEN"'"
-    }'
+# Create JSON payload for the API request - aligned with NewFlowUpdates.md schema
+create_payload() {
+  local payload="{"
   
-  echo -e "${YELLOW}Deployment will be attempted with GitHub and Netlify.${NC}"
-  echo -e "${BLUE}Using deployment target: netlify-github${NC}"
-else
-  echo -e "${YELLOW}Deployment will be skipped due to missing credentials.${NC}"
-fi
+  # Basic project info
+  payload+="\"content\":\"$REQUIREMENTS\","
+  payload+="\"name\":\"$PROJECT_NAME\""
+  
+  # Explicitly add setupGitHub flag if enabled
+  if [ "$SETUP_GITHUB" = true ]; then
+    payload+=",\"setupGitHub\":true"
+  fi
+  
+  # Add deployment configuration if needed
+  if [ "$SHOULD_DEPLOY" = true ]; then
+    payload+=",\"shouldDeploy\":true,"
+    payload+="\"deploymentTarget\":\"netlify\""
+  fi
+  
+  # Add credentials section - must be present for both flows
+  if [ "$SETUP_GITHUB" = true ] || [ "$SHOULD_DEPLOY" = true ]; then
+    payload+=",\"credentials\":{"
+    
+    # Add GitHub credentials
+    if [ "$SETUP_GITHUB" = true ]; then
+      payload+="\"github\":{\"token\":\"$GITHUB_TOKEN\",\"owner\":\"$GITHUB_OWNER\"}"
+      if [ "$SHOULD_DEPLOY" = true ]; then
+        payload+=","
+      fi
+    fi
+    
+    # Add Netlify credentials
+    if [ "$SHOULD_DEPLOY" = true ]; then
+      payload+="\"netlify\":{\"apiToken\":\"$NETLIFY_TOKEN\"}"
+    fi
+    
+    payload+="}"
+  fi
+  
+  payload+="}"
+  echo "$payload"
+}
 
-# Create the JSON payload
-cat > "$PAYLOAD_FILE" << EOF
-{
-  "content": $(python3 -c "import json; print(json.dumps('''$REQUIREMENTS'''))"),
-  "projectName": "$PROJECT_NAME"
-EOF
+# Generate the payload
+PAYLOAD=$(create_payload)
 
-# Add deployment section if needed
-if [ "$SHOULD_DEPLOY" = true ]; then
-  cat >> "$PAYLOAD_FILE" << EOF
-  ,
-  $DEPLOY_SECTION
-EOF
-fi
-
-# Close the JSON object
-echo "}" >> "$PAYLOAD_FILE"
-
-# Submit the requirements to create a project
-echo -e "${YELLOW}Submitting requirements...${NC}"
-echo -e "${YELLOW}URL: ${API_BASE_URL}/api/requirements${NC}"
-
-# Print a summary of what we're sending for debugging
-echo -e "${BLUE}Request Summary:${NC}"
-echo -e "  Project Name: ${PROJECT_NAME}"
-echo -e "  Deployment Target: ${SHOULD_DEPLOY:+'netlify-github'}"
-echo -e "  GitHub Token: ${GITHUB_TOKEN:0:5}...${GITHUB_TOKEN:(-5)}${NC}" 2>/dev/null || echo -e "  GitHub Token: (not provided)${NC}"
-echo -e "  GitHub Owner: ${GITHUB_OWNER:-'(not provided)'}"
-echo -e "  Netlify Token: ${NETLIFY_TOKEN:0:5}...${NETLIFY_TOKEN:(-5)}${NC}" 2>/dev/null || echo -e "  Netlify Token: (not provided)${NC}"
-
-# Debug: Print the request payload
+# Debug output of payload
 if [ "$DEBUG" = true ]; then
-  echo -e "${BLUE}Request Payload:${NC}"
-  cat "$PAYLOAD_FILE" | python3 -m json.tool || cat "$PAYLOAD_FILE"
+  echo -e "${BLUE}==== API Request Payload ====${NC}"
+  echo "$PAYLOAD" | python3 -m json.tool 2>/dev/null || echo "$PAYLOAD"
+  echo -e "${BLUE}============================${NC}"
   echo ""
 fi
 
+echo -e "${YELLOW}Submitting requirements...${NC}"
 CREATE_RESPONSE=$(curl -s -X POST "${API_BASE_URL}/api/requirements" \
   -H "Content-Type: application/json" \
-  -d @"$PAYLOAD_FILE")
-
-# Clean up temporary file
-rm -f "$PAYLOAD_FILE"
+  -H "x-tenant-id: ${TENANT_ID}" \
+  -d "$PAYLOAD")
 
 # Check if the request was successful
 if [[ ! "$CREATE_RESPONSE" == *"\"success\":true"* ]]; then
@@ -264,7 +227,7 @@ echo -e "${YELLOW}API Response:${NC} $CREATE_RESPONSE"
 if [ "$DEBUG" = true ]; then
   echo ""
   echo -e "${BLUE}==== Complete API Response (formatted) ====${NC}"
-  echo "$CREATE_RESPONSE" | python3 -m json.tool || echo "$CREATE_RESPONSE"
+  echo "$CREATE_RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$CREATE_RESPONSE"
   echo -e "${BLUE}==========================================${NC}"
   echo ""
 fi
@@ -281,69 +244,126 @@ echo -e "${GREEN}Project created successfully!${NC}"
 echo -e "Project ID: $PROJECT_ID"
 echo ""
 
-# Check if deployment was requested and completed
-if [ "$SHOULD_DEPLOY" = true ]; then
-  # Extract deployment URL if present
-  DEPLOYMENT_URL=$(echo "$CREATE_RESPONSE" | grep -o '"url":"[^"]*"' | sed 's/"url":"//;s/"//')
-  DEPLOYMENT_STATUS=$(echo "$CREATE_RESPONSE" | grep -o '"status":"[^"]*"' | sed 's/"status":"//;s/"//')
-  DEPLOYMENT_PROVIDER=$(echo "$CREATE_RESPONSE" | grep -o '"provider":"[^"]*"' | sed 's/"provider":"//;s/"//')
+# Extract phases information
+if [[ "$CREATE_RESPONSE" == *"\"phases\":"* ]]; then
+  echo -e "${BLUE}Phases Results:${NC}"
   
-  # Extract any error information
-  ERROR_MESSAGE=$(echo "$CREATE_RESPONSE" | grep -o '"error":"[^"]*"' | sed 's/"error":"//;s/"//')
-  
-  # More detailed deployment diagnostics
-  echo -e "${BLUE}Deployment Diagnostics:${NC}"
-  echo -e "  Deployment Provider: ${DEPLOYMENT_PROVIDER:-'(not reported)'}"
-  echo -e "  Deployment Status: ${DEPLOYMENT_STATUS:-'(not reported)'}"
-  echo -e "  Deployment URL: ${DEPLOYMENT_URL:-'(not reported)'}"
-  echo -e "  Error Messages: ${ERROR_MESSAGE:-'(none reported)'}"
-  
-  if [ -n "$DEPLOYMENT_URL" ]; then
-    echo -e "${GREEN}Deployment initiated!${NC}"
-    echo -e "Deployment URL: $DEPLOYMENT_URL"
-    echo -e "Deployment Status: $DEPLOYMENT_STATUS"
-    
-    # If deployment is in progress, wait and check status
-    if [ "$DEPLOYMENT_STATUS" = "in-progress" ]; then
-      echo -e "${YELLOW}Deployment is in progress. Waiting for completion...${NC}"
-      
-      # Try to poll the status for up to 5 minutes
-      MAX_ATTEMPTS=30
-      ATTEMPT=0
-      
-      while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-        ATTEMPT=$((ATTEMPT+1))
-        echo -e "${YELLOW}Checking deployment status (attempt $ATTEMPT/$MAX_ATTEMPTS)...${NC}"
-        
-        sleep 10
-        
-        # Check if the URL is accessible
-        if check_url "$DEPLOYMENT_URL"; then
-          echo -e "${GREEN}Deployment is now accessible at: $DEPLOYMENT_URL${NC}"
-          break
-        fi
-        
-        # If we've reached max attempts, notify but don't fail
-        if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-          echo -e "${YELLOW}Max check attempts reached. Deployment may still be in progress.${NC}"
-          echo -e "${YELLOW}Check manually at: $DEPLOYMENT_URL${NC}"
-        fi
-      done
+  # Extract code generation phase status
+  if [[ "$CREATE_RESPONSE" == *"\"codeGeneration\":"* ]]; then
+    CODEGEN_STATUS=$(echo "$CREATE_RESPONSE" | grep -o '"codeGeneration":{[^}]*}' | grep -o '"status":"[^"]*"' | sed 's/"status":"//;s/"//')
+    CODEGEN_ERROR=$(echo "$CREATE_RESPONSE" | grep -o '"codeGeneration":{[^}]*}' | grep -o '"error":"[^"]*"' | sed 's/"error":"//;s/"//')
+    echo -e "  Code Generation: ${CODEGEN_STATUS:-'unknown'}"
+    if [ -n "$CODEGEN_ERROR" ]; then
+      echo -e "    Error: $CODEGEN_ERROR"
     fi
   else
-    echo -e "${YELLOW}No deployment information found in the response.${NC}"
+    echo -e "  Code Generation: No results reported"
+  fi
+  
+  # Extract GitHub phase status if present
+  if [[ "$CREATE_RESPONSE" == *"\"github\":"* ]]; then
+    GITHUB_STATUS=$(echo "$CREATE_RESPONSE" | grep -o '"github":{[^}]*}' | grep -o '"status":"[^"]*"' | sed 's/"status":"//;s/"//')
+    GITHUB_ERROR=$(echo "$CREATE_RESPONSE" | grep -o '"github":{[^}]*}' | grep -o '"error":"[^"]*"' | sed 's/"error":"//;s/"//')
+    GITHUB_URL=$(echo "$CREATE_RESPONSE" | grep -o '"repositoryUrl":"[^"]*"' | sed 's/"repositoryUrl":"//;s/"//')
+    echo -e "  GitHub Setup: ${GITHUB_STATUS:-'unknown'}"
+    if [ -n "$GITHUB_ERROR" ]; then
+      echo -e "    Error: $GITHUB_ERROR"
+    fi
+    if [ -n "$GITHUB_URL" ]; then
+      echo -e "    URL: $GITHUB_URL"
+    fi
+  elif [ "$SETUP_GITHUB" = true ]; then
+    echo -e "  GitHub Setup: No results reported (but was requested)"
+    echo -e "    This may indicate that the server does not yet implement Phase 2 from NewFlowUpdates.md"
+  fi
+  
+  # Extract deployment phase status if present
+  if [[ "$CREATE_RESPONSE" == *"\"deployment\":"* ]]; then
+    DEPLOYMENT_STATUS=$(echo "$CREATE_RESPONSE" | grep -o '"deployment":{[^}]*}' | grep -o '"status":"[^"]*"' | sed 's/"status":"//;s/"//')
+    DEPLOYMENT_ERROR=$(echo "$CREATE_RESPONSE" | grep -o '"deployment":{[^}]*}' | grep -o '"error":"[^"]*"' | sed 's/"error":"//;s/"//')
+    DEPLOYMENT_URL=$(echo "$CREATE_RESPONSE" | grep -o '"url":"[^"]*"' | sed 's/"url":"//;s/"//')
+    echo -e "  Deployment: ${DEPLOYMENT_STATUS:-'unknown'}"
+    if [ -n "$DEPLOYMENT_ERROR" ]; then
+      echo -e "    Error: $DEPLOYMENT_ERROR"
+    fi
+    if [ -n "$DEPLOYMENT_URL" ]; then
+      echo -e "    URL: $DEPLOYMENT_URL"
+    fi
+  elif [ "$SHOULD_DEPLOY" = true ]; then
+    echo -e "  Deployment: No results reported (but was requested)"
+    echo -e "    This may indicate that the server does not yet implement Phase 3 from NewFlowUpdates.md"
+  fi
+fi
+
+# Extract available links
+if [[ "$CREATE_RESPONSE" == *"\"links\":"* ]]; then
+  echo -e "${BLUE}Available Links:${NC}"
+  
+  # Extract download URL
+  DOWNLOAD_URL=$(echo "$CREATE_RESPONSE" | grep -o '"downloadUrl":"[^"]*"' | sed 's/"downloadUrl":"//;s/"//')
+  if [ -n "$DOWNLOAD_URL" ]; then
+    echo -e "  Download URL: ${API_BASE_URL}${DOWNLOAD_URL}"
+  fi
+  
+  # Extract GitHub URL
+  GITHUB_URL=$(echo "$CREATE_RESPONSE" | grep -o '"githubUrl":"[^"]*"' | sed 's/"githubUrl":"//;s/"//')
+  if [ -n "$GITHUB_URL" ]; then
+    echo -e "  GitHub URL: $GITHUB_URL"
+  elif [ "$SETUP_GITHUB" = true ]; then
+    echo -e "  GitHub URL: Not available (but was requested)"
+  fi
+  
+  # Extract deployment URL
+  DEPLOYMENT_URL=$(echo "$CREATE_RESPONSE" | grep -o '"deploymentUrl":"[^"]*"' | sed 's/"deploymentUrl":"//;s/"//')
+  if [ -n "$DEPLOYMENT_URL" ]; then
+    echo -e "  Deployment URL: $DEPLOYMENT_URL"
+  elif [ "$SHOULD_DEPLOY" = true ]; then
+    echo -e "  Deployment URL: Not available (but was requested)"
   fi
 fi
 
 # Summary
 echo ""
 echo -e "${GREEN}===== Test Summary =====${NC}"
+echo -e "Environment: $ENVIRONMENT"
+echo -e "Tenant ID: $TENANT_ID"
 echo -e "Project ID: $PROJECT_ID"
 echo -e "Project Name: $PROJECT_NAME"
-if [ -n "$DEPLOYMENT_URL" ]; then
-  echo -e "Deployment URL: $DEPLOYMENT_URL"
-  echo -e "Deployment Status: $DEPLOYMENT_STATUS"
+echo -e "GitHub Setup: ${SETUP_GITHUB}"
+echo -e "Deploy: ${SHOULD_DEPLOY}"
+
+# Implementation status check
+echo ""
+echo -e "${YELLOW}===== Implementation Status Check =====${NC}"
+if [ "$SETUP_GITHUB" = true ] && [[ ! "$CREATE_RESPONSE" == *"\"github\":"* ]]; then
+  echo -e "${YELLOW}⚠️  GitHub integration appears not to be implemented${NC}"
+  echo -e "   - setupGitHub flag is set to true in the request"
+  echo -e "   - Credentials are properly provided"
+  echo -e "   - But the response does not contain GitHub phase information"
+  echo -e "   - This suggests Phase 2 from NewFlowUpdates.md is not yet implemented"
+fi
+
+if [ "$SHOULD_DEPLOY" = true ] && [[ ! "$CREATE_RESPONSE" == *"\"deployment\":"* ]]; then
+  echo -e "${YELLOW}⚠️  Deployment appears not to be implemented${NC}"
+  echo -e "   - shouldDeploy flag is set to true in the request"
+  echo -e "   - Credentials are properly provided"
+  echo -e "   - But the response does not contain deployment phase information" 
+  echo -e "   - This suggests Phase 3 from NewFlowUpdates.md is not yet implemented"
 fi
 
 echo ""
 echo -e "${GREEN}🎉 E2E Test Completed!${NC}" 
+
+# Display usage instructions at the end
+echo ""
+echo -e "${BLUE}Usage:${NC}"
+echo -e "  $0 [local|preview|prod] [tenant_id] [--github] [--deploy] [--full]"
+echo -e "  - local: Test against local development environment (default)"
+echo -e "  - preview: Test against preview environment"
+echo -e "  - prod: Test against production environment"
+echo -e "  - tenant_id: Optional tenant ID (default: 'default')"
+echo -e "  - --github: Enable GitHub setup"
+echo -e "  - --deploy: Enable deployment"
+echo -e "  - --full: Enable both GitHub setup and deployment"
+echo -e ""
+echo -e "Example: $0 preview test-tenant --full" 

@@ -16,21 +16,24 @@ export const meta: MetaFunction = () => {
 };
 
 export async function loader(args: LoaderFunctionArgs) {
-  // Extract initialRequirements and fromWebhook flag from the URL
+  // Extract initialRequirements, fromWebhook flag, and additionalRequirement flag from the URL
   const url = new URL(args.request.url);
   const initialRequirements = url.searchParams.get('initialRequirements');
   const fromWebhook = url.searchParams.get('fromWebhook') === 'true';
+  const additionalRequirement = url.searchParams.get('additionalRequirement') === 'true';
 
   if (initialRequirements) {
     logger.info('Initial requirements detected in URL for new project', {
       requirementsLength: initialRequirements.length,
       fromWebhook,
+      isAdditionalRequirement: additionalRequirement
     });
   }
 
   return json({
     initialRequirements: initialRequirements ? decodeURIComponent(initialRequirements) : null,
     fromWebhook,
+    additionalRequirement
   });
 }
 

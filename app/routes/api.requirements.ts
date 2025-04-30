@@ -10,6 +10,9 @@ import type { D1Database } from '@cloudflare/workers-types';
 import { v4 as uuidv4 } from 'uuid';
 import { runRequirementsChain } from '~/lib/middleware/requirements-chain';
 import type { DeploymentResult } from '~/lib/deployment/types';
+import { withErrorHandling } from '~/lib/middleware/error-handler';
+import type { ApiResponse } from '~/lib/middleware/error-handler';
+import { getErrorService, ErrorCategory } from '~/lib/services/error-service';
 
 const logger = createScopedLogger('api-requirements');
 
@@ -209,252 +212,188 @@ async function updateRequirements(
 }
 
 /**
- * GET handler for requirements API
+ * Core handler logic for loading requirements
  */
-export async function loader({ context }: LoaderFunctionArgs & { context: CloudflareContext }) {
+async function handleGetRequirements({ context }: LoaderFunctionArgs & { context: CloudflareContext }) {
+  logger.debug('Loading requirements data');
+  
+  const d1 = context.cloudflare.env.DB;
+  if (!d1) {
+    const errorService = getErrorService();
+    throw errorService.createInternalError('Database not available');
+  }
+  
+  // Get or create requirements project
+  const requirementsProject = await getOrCreateRequirementsProject(d1);
+  
+  // Enhance requirements
+  const enhancedRequirements = enhanceRequirements(requirementsProject.requirements || []);
+
+  logger.info('Requirements loaded successfully', {
+    requirementsCount: enhancedRequirements.length,
+    webhooksCount: requirementsProject.webhooks?.length || 0
+  });
+
+  return {
+    requirements: enhancedRequirements,
+    webhooks: requirementsProject.webhooks || []
+  };
+}
+
+interface RequirementsRequestBody {
+  credentials?: {
+    github?: { token: string; owner?: string };
+    netlify?: { apiToken: string };
+    cloudflare?: { accountId: string; apiToken: string; projectName?: string };
+  };
+  deploymentTarget?: string;
+  setupGitHub?: boolean;
+  [key: string]: any;
+}
+
+/**
+ * Core handler logic for processing requirements
+ */
+export async function handleProcessRequirements({ request, context }: ActionFunctionArgs) {
+  const logger = createScopedLogger('api-requirements');
+  
   try {
-    logger.debug('Loading requirements data');
+    // Log the incoming request
+    const body = await request.clone().json() as RequirementsRequestBody;
+    logger.debug('📥 Incoming request:', {
+      hasBody: !!body,
+      bodyKeys: Object.keys(body),
+      hasCredentials: !!body.credentials,
+      credentialKeys: body.credentials ? Object.keys(body.credentials) : [],
+      deploymentTarget: body.deploymentTarget,
+      setupGitHub: body.setupGitHub
+    });
+
+    // Extract tenant ID from request
+    const tenantId = request.headers.get('x-tenant-id') || undefined;
+    logger.debug('🔍 Extracted tenant ID:', { tenantId });
+
+    // Run the requirements chain
+    const resultContext = await runRequirementsChain(request, context);
     
-    const d1 = context.cloudflare.env.DB;
-    if (!d1) {
-      logger.error('D1 database not available');
-      throw new Error('Database not available');
+    // Log the result context
+    logger.debug('📤 Result context:', {
+      projectId: resultContext.projectId,
+      hasDeploymentResult: !!resultContext.deploymentResult,
+      deploymentStatus: resultContext.deploymentResult?.status,
+      hasError: !!resultContext.error,
+      errorMessage: resultContext.error?.message,
+      hasGitHubInfo: !!resultContext.githubInfo,
+      githubError: resultContext.githubError?.message,
+      hasGitHubOptions: !!resultContext.githubOptions,
+      githubSetupRequested: resultContext.githubOptions?.setupGitHub
+    });
+
+    // If there was a critical error, return it
+    if (resultContext.error && (!resultContext.projectId || !resultContext.generatedFiles)) {
+      const errorService = getErrorService();
+      throw errorService.normalizeError(
+        resultContext.error,
+        'Failed to process requirements'
+      );
     }
     
-    // Get or create requirements project
-    const requirementsProject = await getOrCreateRequirementsProject(d1);
+    // Determine success status for each phase
+    const codeGenerationSuccess = !!resultContext.projectId && !!resultContext.generatedFiles;
+    const githubSuccess = resultContext.githubOptions?.setupGitHub 
+      ? !!resultContext.githubInfo && !resultContext.githubError 
+      : undefined;
+    const deploymentSuccess = resultContext.shouldDeploy 
+      ? resultContext.deploymentResult?.status === 'success' 
+      : undefined;
     
-    // Enhance requirements
-    const enhancedRequirements = enhanceRequirements(requirementsProject.requirements || []);
-
-    logger.info('Requirements loaded successfully', {
-      requirementsCount: enhancedRequirements.length,
-      webhooksCount: requirementsProject.webhooks?.length || 0
+    logger.info('Requirements processed', {
+      success: codeGenerationSuccess,
+      projectId: resultContext.projectId,
+      hasGitHubRepo: !!resultContext.githubInfo,
+      hasDeployment: !!resultContext.deploymentResult,
+      deploymentUrl: resultContext.deploymentResult?.url || 'none'
     });
-
-    return json<RequirementsResponseData>({
-      success: true,
-      data: {
-        requirements: enhancedRequirements,
-        webhooks: requirementsProject.webhooks || []
+    
+    // Return comprehensive response with modular phases information
+    return {
+      success: codeGenerationSuccess,
+      projectId: resultContext.projectId,
+      isNewProject: resultContext.isNewProject,
+      name: resultContext.name || '',
+      fileCount: Object.keys(resultContext.generatedFiles || {}).length,
+      // Links section with all available links
+      links: {
+        downloadUrl: resultContext.archiveKey 
+          ? `/api/download-project/${resultContext.projectId}` 
+          : undefined,
+        githubUrl: resultContext.githubInfo?.url,
+        deploymentUrl: resultContext.deploymentResult?.url
+      },
+      // Detailed status for each phase in the modular flow
+      phases: {
+        codeGeneration: {
+          status: codeGenerationSuccess ? 'success' : 'failed',
+          error: resultContext.error?.message,
+          completedAt: resultContext.isNewProject 
+            ? new Date().toISOString() 
+            : undefined
+        },
+        // Only include github phase if it was requested
+        github: resultContext.githubOptions?.setupGitHub ? {
+          status: githubSuccess ? 'success' : 'failed',
+          error: resultContext.githubError?.message,
+          repositoryUrl: resultContext.githubInfo?.url,
+          repositoryName: resultContext.githubInfo?.fullName,
+          branch: resultContext.githubInfo?.defaultBranch
+        } : undefined,
+        // Only include deployment phase if it was requested
+        deployment: resultContext.shouldDeploy ? {
+          status: deploymentSuccess ? 'success' : 'failed',
+          error: resultContext.deploymentError instanceof Error 
+            ? resultContext.deploymentError.message 
+            : resultContext.deploymentError 
+              ? String(resultContext.deploymentError) 
+              : undefined,
+          url: resultContext.deploymentResult?.url,
+          provider: resultContext.deploymentResult?.provider,
+          deploymentId: resultContext.deploymentResult?.id
+        } : undefined
       }
-    });
+    };
   } catch (error) {
-    logger.error('Failed to load requirements:', error);
-    return json<RequirementsResponseData>({
-      success: false,
-      error: {
-        message: error instanceof Error ? error.message : 'Unknown error occurred',
-        code: RequirementsApiErrorCode.PROCESSING_ERROR
-      }
-    });
+    logger.error('Error processing requirements', error);
+    throw error;
   }
 }
 
 /**
- * API endpoint for handling requirements processing
- * POST /api/requirements - Process requirements and generate code/project
+ * Validate authentication from request
  */
-export const action = async ({ request, context }: ActionFunctionArgs & { context: CloudflareContext }) => {
-  try {
-    logger.info('Running requirements processing chain', {
-      method: request.method,
-      url: request.url,
-      hasContext: !!context,
-      hasCloudflare: !!context?.cloudflare,
-      hasEnv: !!context?.cloudflare?.env,
-      envKeys: context?.cloudflare?.env ? Object.keys(context.cloudflare.env) : []
-    });
-
-    // Determine request type - form data or JSON
-    const contentType = request.headers.get('Content-Type') || '';
-    let projectId, requirements, webhooks, shouldDeploy, targetName, netlifyCredentials, githubCredentials, setupGitHub;
+async function validateAuthentication(request: Request, context: CloudflareContext): Promise<string | undefined> {
+  // Check for API key or token in headers
+  const authHeader = request.headers.get('Authorization');
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
     
-    if (contentType.includes('application/json')) {
-      // Handle JSON request
-      const body = await request.json() as {
-        projectId?: string;
-        requirements?: string;
-        content?: string;
-        webhooks?: string;
-        shouldDeploy?: boolean;
-        targetName?: string;
-        netlifyCredentials?: Record<string, any>;
-        githubCredentials?: Record<string, any>;
-        setupGitHub?: boolean;
-      };
-      
-      projectId = body.projectId;
-      requirements = body.requirements || body.content;
-      webhooks = body.webhooks;
-      shouldDeploy = body.shouldDeploy;
-      targetName = body.targetName;
-      netlifyCredentials = body.netlifyCredentials;
-      githubCredentials = body.githubCredentials;
-      setupGitHub = body.setupGitHub;
-    } else {
-      // Handle form data request
-      const formData = await request.formData();
-      projectId = formData.get('projectId') as string;
-      requirements = formData.get('requirements');
-      webhooks = formData.get('webhooks');
-      shouldDeploy = formData.get('shouldDeploy') === 'true';
-      targetName = formData.get('targetName') as string;
-      
-      // Try to parse credentials if provided as strings
-      try {
-        const netlifyCredsStr = formData.get('netlifyCredentials');
-        if (netlifyCredsStr) {
-          netlifyCredentials = JSON.parse(netlifyCredsStr as string);
-        }
-        
-        const githubCredsStr = formData.get('githubCredentials');
-        if (githubCredsStr) {
-          githubCredentials = JSON.parse(githubCredsStr as string);
-        }
-      } catch (error) {
-        logger.warn('Failed to parse credentials from form data:', error);
-      }
-      
-      setupGitHub = formData.get('setupGitHub') === 'true';
-    }
-
-    // Validate inputs
-    if (!requirements) {
-      throw new Error('Missing requirements content');
-    }
-    
-    // Special case for the requirements collection project
-    if (projectId === 'requirements') {
-      logger.info('Handling special case for requirements collection project');
-      // Just use the existing storage logic for the requirements collection project
-      const d1 = context.cloudflare.env.DB;
-      if (!d1) {
-        logger.error('D1 database not available');
-        throw new Error('Database not available');
-      }
-
-      // Parse requirements if it's JSON
-      let parsedRequirements: any[] = [];
-      try {
-        const reqData = JSON.parse(requirements as string);
-        parsedRequirements = Array.isArray(reqData) ? reqData : [{
-          id: `req-${Date.now()}`,
-          content: requirements as string,
-          timestamp: Date.now(),
-          status: 'pending',
-          completedAt: undefined,
-        }];
-      } catch (e) {
-        // If not valid JSON, treat as a single requirement text
-        parsedRequirements = [{
-          id: `req-${Date.now()}`,
-          content: requirements as string,
-          timestamp: Date.now(),
-          status: 'pending',
-          completedAt: undefined,
-        }];
-      }
-
-      // Parse webhooks if provided
-      let webhooksList = [];
-      if (webhooks) {
-        try {
-          webhooksList = JSON.parse(webhooks as string);
-        } catch (e) {
-          logger.warn('Failed to parse webhooks JSON', e);
-        }
-      }
-
-      // Get or create requirements project
-      const requirementsProject = await getOrCreateRequirementsProject(d1);
-      
-      // Update requirements
-      const updatedProject = await updateRequirements(d1, requirementsProject, parsedRequirements);
-      
-      // Update webhooks if provided
-      if (webhooks) {
-        const d1Adapter = new D1StorageAdapter(d1);
-        await d1Adapter.updateProject('requirements', {
-          webhooks: webhooksList
-        });
-      }
-      
-      return json<RequirementsResponseData>({
-        success: true,
-        data: {
-          requirements: enhanceRequirements(updatedProject.requirements || []),
-          webhooks: updatedProject.webhooks || webhooksList
-        }
-      });
-    }
-    
-    // For regular project generation, use the requirements chain
-    logger.info('Running requirements processing chain', { 
-      newProject: !projectId,
-      shouldDeploy,
-      targetName
-    });
-    
-    // Create a modified request with the necessary data for the requirements chain
-    const modifiedRequest = new Request(request.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cookie': request.headers.get('Cookie') || ''
-      },
-      body: JSON.stringify({
-        projectId,
-        content: requirements,
-        shouldDeploy: shouldDeploy || false,
-        deploymentTarget: targetName || 'auto',
-        deploymentOptions: {
-          netlifyCredentials,
-          githubCredentials,
-          setupGitHub
-        }
-      })
-    });
-    
-    // Run the requirements chain
-    const result = await runRequirementsChain(modifiedRequest, context);
-    
-    // Handle errors from the chain
-    if (result.error) {
-      logger.error('Error in requirements chain:', result.error);
-      throw result.error;
-    }
-    
-    // Return the result
-    return json({
-      success: true,
-      data: {
-        projectId: result.projectId,
-        files: Object.keys(result.files || {}).length,
-        isNewProject: result.isNewProject,
-        deployment: result.deploymentResult as DeploymentResult
-      }
-    });
-  } catch (error) {
-    logger.error('Failed to process requirements:', error);
-    
-    if (error instanceof RequirementsApiError) {
-      return json<RequirementsResponseData>({
-        success: false,
-        error: {
-          message: error.message,
-          code: error.code,
-          context: error.context
-        }
-      });
-    }
-
-    return json<RequirementsResponseData>({
-      success: false,
-      error: {
-        message: error instanceof Error ? error.message : 'Unknown error occurred',
-        code: RequirementsApiErrorCode.PROCESSING_ERROR
-      }
-    });
+    // For now, we'll just use the token as a user ID
+    // In a real implementation, this would verify the token
+    return token;
   }
-};
+  
+  // Check for API key in query params
+  const url = new URL(request.url);
+  const apiKey = url.searchParams.get('apiKey');
+  if (apiKey) {
+    // For now, we'll just use the API key as a user ID
+    // In a real implementation, this would verify the API key
+    return apiKey;
+  }
+  
+  // No authentication provided - that's okay, we'll process anonymously
+  return undefined;
+}
+
+// Wrap the handlers with the error handling middleware
+export const loader = withErrorHandling(handleGetRequirements);
+export const action = withErrorHandling(handleProcessRequirements);

@@ -389,7 +389,13 @@ export const ChatImpl = memo(
            * Use window.location.replace to avoid adding to browser history
            * This prevents the issue of navigating back to home page after redirect
            */
-          window.location.replace(`/chat/${projectId}?initialRequirements=${encodeURIComponent(messageContent)}`);
+          // Get current tenant ID if available
+          const currentTenantId = localStorage.getItem('tenantId') || sessionStorage.getItem('tenantId');
+          const tenantParam = currentTenantId ? `&tenantId=${encodeURIComponent(currentTenantId)}` : '';
+          
+          window.location.replace(
+            `/chat/${projectId}?initialRequirements=${encodeURIComponent(messageContent)}&additionalRequirement=true${tenantParam}`
+          );
 
           return;
         }
