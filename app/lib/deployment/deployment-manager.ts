@@ -3,7 +3,6 @@ import { getEnvironment, EnvironmentType } from '~/lib/environments';
 import type { DeploymentTarget } from './targets/base';
 import { CloudflarePagesTarget } from './targets/cloudflare-pages';
 import { NetlifyTarget } from './targets/netlify';
-import { NetlifyGitHubTarget } from './targets/netlify-github';
 import type { 
   DeploymentResult, 
   DeployOptions,
@@ -15,6 +14,7 @@ import { DeploymentErrorType } from './types';
 import { LocalZipTarget } from './targets/local-zip';
 import { getCloudflareCredentials, getNetlifyCredentials, getGitHubCredentials } from './credentials';
 import { getProjectStorageService } from '~/lib/projects/storage-service';
+import { DeploymentTargetRegistry } from './target-registry';
 
 const logger = createScopedLogger('deployment-manager');
 
@@ -43,13 +43,9 @@ export class DeploymentManager {
   // Make constructor private to force initialization via static create method
   private constructor(options?: DeploymentManagerOptions) {
     this.preferredTargets = options?.preferredTargets || [
-      'netlify-github', // Keep netlify-github as highest priority
       'netlify',
       'cloudflare-pages',
-      'vercel',
-      'github-pages',
-      'local-tunnel',
-      'local-zip' // Ensure local-zip is always considered, but last
+      'local-zip'
     ];
     
     // Basic sync initialization can remain here if needed, like setting preferredTargets
@@ -123,66 +119,6 @@ export class DeploymentManager {
       logger.error('Failed to register Netlify deployment target (error during registration):', error);
     }
 
-    // --- NetlifyGitHub Target Registration ---
-    try {
-      let netlifyToken = options?.netlifyToken;
-      let githubToken = options?.githubToken;
-      
-      if (!netlifyToken) {
-        const netlifyCreds = getNetlifyCredentials();
-        netlifyToken = netlifyCreds.apiToken;
-      }
-
-      if (!githubToken) {
-        const githubCreds = getGitHubCredentials();
-        githubToken = githubCreds.token;
-      }
-
-      logger.debug(`NetlifyGitHub tokens check: Netlify=${!!netlifyToken} (${netlifyToken ? netlifyToken.length : 0}), GitHub=${!!githubToken} (${githubToken ? githubToken.length : 0})`);
-
-      if (netlifyToken && githubToken) {
-        logger.info('Attempting to register NetlifyGitHub deployment target (Both tokens found)');
-        
-        const githubCreds = getGitHubCredentials();
-        const netlifyGithubTarget = new NetlifyGitHubTarget({ 
-          netlifyToken, 
-          githubToken,
-          githubOwner: githubCreds.owner 
-        });
-        
-        logger.debug('NetlifyGitHubTarget instantiated with configuration:', {
-          hasNetlifyToken: !!netlifyToken,
-          hasGithubToken: !!githubToken,
-          hasGithubOwner: !!githubCreds.owner
-        });
-        
-        logger.debug('NetlifyGitHubTarget instantiated. Calling isAvailable()...');
-        try {
-          const isAvailable = await netlifyGithubTarget.isAvailable();
-          logger.debug(`NetlifyGitHubTarget.isAvailable() returned: ${isAvailable}`);
-          
-          if (isAvailable) {
-            this.registerTarget('netlify-github', netlifyGithubTarget);
-            logger.info('Successfully registered NetlifyGitHub deployment target');
-          } else {
-            logger.warn('NetlifyGitHub deployment target tokens found but API validation failed');
-            logger.debug('Token details for debugging:', {
-              netlifyLength: netlifyToken.length,
-              netlifyPrefix: netlifyToken.substring(0, 4),
-              githubLength: githubToken.length,
-              githubPrefix: githubToken.substring(0, 4)
-            });
-          }
-        } catch (error) {
-          logger.error('Error checking if NetlifyGitHub target is available:', error);
-        }
-      } else {
-        logger.warn('NetlifyGitHub deployment target not registered - missing tokens');
-      }
-    } catch (error) {
-      logger.error('Failed to register NetlifyGitHub deployment target:', error);
-    }
-    
     // --- Cloudflare Pages Target Registration ---
     try {
       let cfConfig = options?.cloudflareConfig;
@@ -290,7 +226,7 @@ export class DeploymentManager {
     if (availableTargets.length === 0) {
       logger.error('No deployment targets available');
       throw this.createError(
-        DeploymentErrorType.NOT_AVAILABLE,
+        DeploymentErrorType.UNKNOWN,
         'No deployment targets available'
       );
     }
@@ -396,7 +332,11 @@ export class DeploymentManager {
       return result;
     } catch (error) {
       logger.error(`Deployment failed with target ${targetName}:`, error);
-      throw error;
+      throw this.createError(
+        DeploymentErrorType.DEPLOYMENT_FAILED,
+        `Deployment with ${targetName} failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        error instanceof Error ? error : undefined
+      );
     }
   }
   
@@ -552,20 +492,6 @@ export class DeploymentManager {
         token: options.netlifyToken  // NetlifyTarget constructor expects 'token', not 'apiToken'
       });
       this.targets.set('netlify', netlifyTarget);
-    }
-
-    // Initialize Netlify GitHub target if both tokens are available
-    if (options.netlifyToken && options.githubToken) {
-      logger.debug('Registering Netlify-GitHub target with tokens', { 
-        netlifyTokenLength: options.netlifyToken.length,
-        githubTokenLength: options.githubToken.length 
-      });
-      const netlifyGitHubTarget = new NetlifyGitHubTarget({
-        netlifyToken: options.netlifyToken,
-        githubToken: options.githubToken,
-        githubOwner: options.githubOwner
-      });
-      this.targets.set('netlify-github', netlifyGitHubTarget);
     }
 
     // Initialize Local Zip target (always available)

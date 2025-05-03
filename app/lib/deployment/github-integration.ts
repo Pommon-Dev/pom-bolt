@@ -114,7 +114,7 @@ export class GitHubIntegrationService {
       
       // Validate token first
       logger.debug('Validating GitHub token...');
-      const isTokenValid = await github.validateToken();
+      const isTokenValid = await this.validateCredentials(config);
       if (!isTokenValid) {
         const errorMsg = 'Invalid GitHub token. Please check your credentials.';
         logger.error(errorMsg);
@@ -415,6 +415,90 @@ export class GitHubIntegrationService {
     }
     
     return sanitized;
+  }
+
+  /**
+   * Validate GitHub credentials
+   */
+  private async validateCredentials(config: GitHubIntegrationConfig, context: any = {}): Promise<boolean> {
+    try {
+      // Log the context structure for debugging
+      logger.debug('GitHub credentials validation context:', {
+        contextType: typeof context,
+        hasContext: !!context,
+        hasCloudflare: !!(context as any)?.cloudflare,
+        hasCfEnv: !!(context as any)?.cloudflare?.env,
+      });
+      
+      // First try from passed credentials
+      let token = config.token;
+      let owner = config.owner;
+      
+      // If not provided directly, try to get from context
+      if (!token || !owner) {
+        // Try multiple paths to find the environment variables
+        // First check cloudflare.env (Cloudflare Pages environment)
+        const cfEnv = (context as any)?.cloudflare?.env || {};
+        
+        // Then check direct env property as fallback
+        const env = context?.env || {};
+        
+        token = token || cfEnv.GITHUB_TOKEN || env.GITHUB_TOKEN || process.env.GITHUB_TOKEN;
+        owner = owner || cfEnv.GITHUB_OWNER || env.GITHUB_OWNER || process.env.GITHUB_OWNER;
+      }
+      
+      // Update the config with any values found from environment
+      config.token = token;
+      config.owner = owner;
+      
+      // For debugging, log token info without revealing it
+      if (token) {
+        logger.debug('GitHub token details:', {
+          tokenLength: token.length,
+          tokenPrefix: token.substring(0, 4),
+          tokenSuffix: token.substring(token.length - 4)
+        });
+      } else {
+        logger.warn('No GitHub token found in credentials or environment');
+      }
+      
+      if (!token) {
+        logger.error('Invalid GitHub token. Please check your credentials.');
+        throw new Error('Invalid GitHub token. Please check your credentials.');
+      }
+
+      if (!owner) {
+        logger.error('Invalid GitHub owner. Please check your credentials.');
+        throw new Error('Invalid GitHub owner. Please check your credentials.');
+      }
+
+      // Test if token is valid by making a simple API call
+      try {
+        const url = 'https://api.github.com/user';
+        const response = await fetch(url, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'PomBolt-App'
+          }
+        });
+        
+        if (!response.ok) {
+          logger.error(`GitHub API validation failed: ${response.status} ${response.statusText}`);
+          throw new Error(`GitHub API validation failed: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        logger.debug('GitHub token validated successfully for user:', (data as any).login);
+        return true;
+      } catch (error) {
+        logger.error('Failed to validate GitHub token with API:', error);
+        throw new Error('GitHub token validation failed. The token may be invalid or expired.');
+      }
+    } catch (error) {
+      logger.error('Error validating GitHub credentials:', error);
+      return false;
+    }
   }
 }
 

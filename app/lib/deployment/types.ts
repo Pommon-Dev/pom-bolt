@@ -165,12 +165,11 @@ export interface BuildResult {
  * Error types for deployment operations
  */
 export enum DeploymentErrorType {
-  API_ERROR = 'API_ERROR',
-  VALIDATION_ERROR = 'VALIDATION_ERROR',
-  INITIALIZATION_FAILED = 'INITIALIZATION_FAILED',
-  DEPLOYMENT_FAILED = 'DEPLOYMENT_FAILED',
-  NOT_AVAILABLE = 'NOT_AVAILABLE',
-  PROJECT_EXISTS = 'PROJECT_EXISTS',
-  UNKNOWN = 'UNKNOWN',
-  VERIFICATION_FAILED = 'VERIFICATION_FAILED'
+  UNKNOWN = 'unknown',
+  VALIDATION_ERROR = 'validation_error',
+  INITIALIZATION_FAILED = 'initialization_failed',
+  DEPLOYMENT_FAILED = 'deployment_failed',
+  VERIFICATION_FAILED = 'verification_failed',
+  GITHUB_SETUP_FAILED = 'github_setup_failed',
+  TENANT_VALIDATION_FAILED = 'tenant_validation_failed'
 } 

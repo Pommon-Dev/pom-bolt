@@ -1,7 +1,6 @@
 import { createScopedLogger } from '~/utils/logger';
 import type { DeploymentTarget } from './targets/base';
 import { NetlifyTarget } from './targets/netlify';
-import { NetlifyGitHubTarget } from './targets/netlify-github';
 import { CloudflarePagesTarget } from './targets/cloudflare-pages';
 import { LocalZipTarget } from './targets/local-zip';
 import type { CloudflareConfig, GitHubConfig, NetlifyConfig } from './types';
@@ -166,66 +165,6 @@ export const NetlifyTargetFactory: DeploymentTargetFactory<any> = {
 };
 
 /**
- * Netlify with GitHub deployment target factory
- * @deprecated Use NetlifyTargetFactory with githubInfo instead
- */
-export const NetlifyGitHubTargetFactory: DeploymentTargetFactory<any> = {
-  create(config: any): DeploymentTarget {
-    // Get Netlify token from various possible locations
-    const netlifyToken = config.netlifyToken || 
-                         (config.netlify && config.netlify.token) || 
-                         (config.netlify && config.netlify.apiToken);
-    
-    // Get GitHub token from various possible locations
-    const githubToken = config.githubToken || 
-                        (config.github && config.github.token);
-    
-    // Get owner from either direct access or github object
-    const githubOwner = config.githubOwner || 
-                        (config.github && config.github.owner);
-    
-    if (!netlifyToken) {
-      logger.error('Netlify token is required for netlify-github target');
-      throw new Error('Netlify API token is required');
-    }
-    
-    if (!githubToken) {
-      logger.error('GitHub token is required for netlify-github target');
-      throw new Error('GitHub token is required');
-    }
-    
-    // Create with full configuration, including existing GitHub info if present
-    return new NetlifyGitHubTarget({
-      netlifyToken,
-      githubToken,
-      githubOwner,
-      githubInfo: config.githubInfo || (config.metadata && config.metadata.github),
-      tenantId: config.tenantId
-    });
-  },
-  
-  getName(): string {
-    return 'netlify-github';
-  },
-  
-  getProviderType(): string {
-    return 'netlify';
-  },
-  
-  validateConfig(config: any): boolean {
-    // Check for all possible token locations
-    const hasNetlifyToken = !!(config.netlifyToken || 
-                             (config.netlify && config.netlify.token) || 
-                             (config.netlify && config.netlify.apiToken));
-    
-    const hasGithubToken = !!(config.githubToken || 
-                            (config.github && config.github.token));
-    
-    return hasNetlifyToken && hasGithubToken;
-  }
-};
-
-/**
  * Cloudflare Pages deployment target factory
  */
 export const CloudflarePagesTargetFactory: DeploymentTargetFactory<CloudflareConfig> = {
@@ -273,6 +212,5 @@ export const LocalZipTargetFactory: DeploymentTargetFactory<{}> = {
 
 // Register all built-in deployment targets
 DeploymentTargetRegistry.register('netlify', NetlifyTargetFactory);
-DeploymentTargetRegistry.register('netlify-github', NetlifyGitHubTargetFactory);
 DeploymentTargetRegistry.register('cloudflare-pages', CloudflarePagesTargetFactory);
 DeploymentTargetRegistry.register('local-zip', LocalZipTargetFactory); 

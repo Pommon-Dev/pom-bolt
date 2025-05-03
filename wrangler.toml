@@ -7,15 +7,21 @@ name = "pom-bolt"
 compatibility_flags = ["nodejs_compat"]
 
 # Set the compatibility date for Cloudflare Workers features
-compatibility_date = "2023-09-22"
+compatibility_date = "2024-09-23"
+
+# Main entry point for the worker
+main = "functions/[[path]].ts"
+
+# Enable metrics collection for monitoring
+send_metrics = true
 
 # Cloudflare Pages configuration
 # This is the directory where your built client files are located
 # The directory that wrangler pages deploy will use
-build = { command = "npm run build", output_dir = "build/client" }
+build = { command = "npm run build" }
 
-# Enable metrics collection for monitoring
-send_metrics = true
+[site]
+bucket = "build/client"
 
 # Main D1 database configuration (for local development)
 [[d1_databases]]
@@ -55,7 +61,7 @@ MAX_FILE_CHUNK_SIZE = "1048576"
 # Production environment configuration
 [env.production]
 # Define environment variables for production
-vars = { NODE_ENV = "production", ENVIRONMENT = "production", SEARCH_INDEX_ENABLED = "true", CACHE_TTL = "3600", MAX_FILE_CHUNK_SIZE = "1048576", MULTI_TENANT_ENABLED = "true", DEFAULT_TENANT_ID = "default", STRICT_TENANT_VALIDATION = "true", DEFAULT_LLM_PROVIDER = "openai", DEFAULT_LLM_MODEL = "gpt-4o" }
+vars = { NODE_ENV = "production", ENVIRONMENT = "production", SEARCH_INDEX_ENABLED = "true", CACHE_TTL = "3600", MAX_FILE_CHUNK_SIZE = "1048576", MULTI_TENANT_ENABLED = "true", DEFAULT_TENANT_ID = "default", STRICT_TENANT_VALIDATION = "true", DEFAULT_LLM_PROVIDER = "openai", DEFAULT_LLM_MODEL = "o3-mini" }
 
 # Production-specific D1 database
 [[env.production.d1_databases]]
@@ -89,21 +95,21 @@ vars = { NODE_ENV = "production", ENVIRONMENT = "preview", SEARCH_INDEX_ENABLED 
 [[env.preview.d1_databases]]
 binding = "DB"
 database_name = "pom-bolt-db-preview"
-database_id = "e75ef667-51ed-490c-b2cd-0f6c1f11412f"
+database_id = "9f541f84-a4bd-4a01-a66d-1e9a3e1a3197"
 
 # Preview-specific KV namespaces
 [[env.preview.kv_namespaces]]
 binding = "PROJECTS_DATA"
-id = "5e84ef01c7f84a35b86aaa6da7f1c6ad"
+id = "996fde3f9f0844e49ec426ab5ed96895"
 
 [[env.preview.kv_namespaces]]
 binding = "POM_BOLT_PROJECTS"
-id = "a452d9d552394ea59d3588498689aec5"
+id = "996fde3f9f0844e49ec426ab5ed96895"
 
 [[env.preview.kv_namespaces]]
 binding = "POM_BOLT_FILES"
-id = "dbe1a024a7ba47229c2bf76597025c6a"
+id = "85b1a2d4432c4d189a019c722ebec145"
 
 [[env.preview.kv_namespaces]]
 binding = "POM_BOLT_CACHE"
-id = "3fc3d45060c04a2c911853ea7faf63eb"
+id = "616fc8a50e88442b8020d5d15b492f2d"

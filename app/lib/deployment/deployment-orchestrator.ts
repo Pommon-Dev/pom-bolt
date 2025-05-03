@@ -355,16 +355,8 @@ export class DeploymentOrchestrator {
         
         if (!availableTargets.includes(targetName)) {
           logger.warn(`Requested deployment target not available: ${targetName}`);
-          
-          // If netlify-github was requested, use plain netlify instead
-          // and pass GitHub info if it's available
-          if (targetName === 'netlify-github') {
-            logger.info('Using netlify target instead of netlify-github to avoid duplicate GitHub setup');
-            targetName = 'netlify';
-          } else {
-            // Otherwise, use auto-select
-            targetName = undefined;
-          }
+          // Use auto-select when target is not available
+          targetName = undefined;
         }
       }
       
@@ -550,55 +542,25 @@ export class DeploymentOrchestrator {
         return null;
       }
       
-      // Create target with Netlify token and GitHub info if available
-      const netlifyOptions: Record<string, any> = {
+      // Create target with GitHub integration if available
+      const targetConfig: any = {
         token: netlifyToken,
         tenantId
       };
       
-      // Pass GitHub info to Netlify target if available
+      // Add GitHub info if available
       if (githubInfo) {
-        logger.info('✅ Passing existing GitHub repository info to Netlify target', {
-          repoName: githubInfo.fullName,
-          repoUrl: githubInfo.url
-        });
-        netlifyOptions.githubInfo = githubInfo;
+        targetConfig.githubInfo = githubInfo;
         
-        // Also pass GitHub credentials if we need to connect to GitHub
+        // If we have GitHub credentials, add them too
         if (credentials.github?.token) {
-          netlifyOptions.githubToken = credentials.github.token;
-          if (credentials.github.owner) {
-            netlifyOptions.githubOwner = credentials.github.owner;
-          }
+          targetConfig.githubToken = credentials.github.token;
+          targetConfig.githubOwner = credentials.github.owner;
         }
       }
       
-      return DeploymentTargetRegistry.createTarget('netlify', netlifyOptions);
-    }
-    
-    // Handle netlify-github target (deprecated but maintained for backward compatibility)
-    else if (targetName === 'netlify-github') {
-      logger.warn('⚠️ netlify-github target is deprecated, consider using netlify target with githubInfo');
-      
-      // Check both token and apiToken for Netlify
-      const netlifyToken = credentials.netlify?.token || credentials.netlify?.apiToken;
-      if (!netlifyToken) {
-        logger.error('❌ Netlify token not provided for netlify-github target');
-        return null;
-      }
-      if (!credentials.github?.token) {
-        logger.error('❌ GitHub token not provided for netlify-github target');
-        return null;
-      }
-      
-      // Create with existing GitHub info if available
-      return DeploymentTargetRegistry.createTarget('netlify-github', {
-        netlifyToken,
-        githubToken: credentials.github.token,
-        githubOwner: credentials.github.owner,
-        tenantId,
-        githubInfo // Pass existing GitHub info if available
-      });
+      logger.debug('Creating Netlify deployment target', { hasGitHubInfo: !!githubInfo });
+      return DeploymentTargetRegistry.createTarget('netlify', targetConfig);
     }
     
     // Handle cloudflare-pages target
@@ -636,11 +598,6 @@ export class DeploymentOrchestrator {
     switch (targetName) {
       case 'netlify':
         return !!credentials.netlify?.token || !!credentials.netlify?.apiToken;
-        
-      case 'netlify-github':
-        // For full netlify-github target, we need both netlify and github tokens
-        // But we're now prioritizing 'netlify' with githubInfo, so this is less used
-        return (!!credentials.netlify?.token || !!credentials.netlify?.apiToken) && !!credentials.github?.token;
         
       case 'cloudflare-pages':
         return !!credentials.cloudflare?.accountId && !!credentials.cloudflare?.apiToken;

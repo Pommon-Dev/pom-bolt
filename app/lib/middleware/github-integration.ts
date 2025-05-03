@@ -27,73 +27,73 @@ async function updateProjectMetadata(projectId: string, metadata: Record<string,
 }
 
 /**
- * Setup GitHub repository for the project
  * This is the middleware function for GitHub integration
+ * It sets up a GitHub repository for a project and updates the context with GitHub information
  */
-export async function setupGitHubRepository(context: RequirementsContext): Promise<RequirementsContext> {
-  // Check for GitHub setup flag in the dedicated githubOptions property
-  if (!context.githubOptions?.setupGitHub) {
-    logger.info('⏭️ GitHub setup skipped - not requested');
-    return context;
-  }
-
-  logger.info('🚀 Setting up GitHub repository');
+export async function setupGitHubRepository(ctx: any = {}): Promise<any> {
+  const projectId = ctx.projectId;
   
   try {
-    // First try to use credentials from githubOptions
-    let githubCredentials = context.githubOptions.credentials;
-    
-    // If not found, fall back to the credential service
-    if (!githubCredentials || !githubCredentials.token) {
-      const credentialService = getCredentialService();
-      const serviceCredentials = credentialService.getGitHubCredentials({
-        env: context.env,
-        requestData: context.deploymentOptions || {},
-        tenantId: context.tenantId
-      });
-      
-      if (serviceCredentials) {
-        githubCredentials = {
-          token: serviceCredentials.token,
-          owner: serviceCredentials.owner
-        };
-      }
+    // Skip if setupGitHub is not true
+    if (!ctx.setupGitHub) {
+      logger.debug('GitHub repository setup skipped - not requested');
+      return {
+        ...ctx,
+        phases: {
+          ...(ctx.phases || {}),
+          github: {
+            status: 'skipped',
+            message: 'GitHub repository setup was not requested'
+          }
+        }
+      };
     }
+
+    const { credentials, project, name } = ctx;
     
-    // Debug log credentials info
-    logger.debug('GitHub credential check:', {
-      hasDirectCredentials: !!context.githubOptions.credentials,
-      hasServiceCredentials: !!githubCredentials,
-      hasToken: !!githubCredentials?.token,
-      hasOwner: !!githubCredentials?.owner
+    logger.debug('Processing GitHub setup request', {
+      hasCredentials: !!credentials,
+      hasGithubCredentials: !!credentials?.github,
+      hasToken: !!credentials?.github?.token, 
+      hasOwner: !!credentials?.github?.owner,
+      projectId,
+      projectName: name || (project?.name || `Project ${projectId}`)
     });
     
-    if (!githubCredentials || !githubCredentials.token) {
-      throw new Error('GitHub credentials required but not provided');
+    if (!credentials?.github) {
+      throw new Error('Missing GitHub credentials');
     }
-    
-    // Update metadata to show GitHub setup in progress
-    await updateProjectMetadata(context.projectId, {
-      github: {
-        status: 'in-progress',
-        startedAt: new Date().toISOString()
-      }
-    });
+
+    if (!projectId) {
+      throw new Error('Missing project ID');
+    }
+
+    // Get project name
+    const projectName = name || (project?.name ? 
+      project.name : 
+      `Project ${projectId}`);
+
+    logger.info(`Setting up GitHub repository for project: ${projectName}`);
     
     // Use existing GitHubIntegrationService
     const { GitHubIntegrationService } = await import('~/lib/deployment/github-integration');
     const githubService = GitHubIntegrationService.getInstance();
     
-    // Create repository with files
+    // Extract files from context
+    const files = ctx.generatedFiles || {};
+    
+    // Set up the repository with the proper interface configuration
     const result = await githubService.setupRepository({
-      token: githubCredentials.token,
-      owner: githubCredentials.owner,
-      projectId: context.projectId,
-      projectName: context.name || 'Generated Project',
-      files: context.generatedFiles || {},
+      token: credentials.github.token,
+      owner: credentials.github.owner,
+      projectId,
+      projectName,
+      files,
+      isPrivate: true,
+      description: `Generated project: ${projectName}`,
       metadata: {
         source: 'github-integration-middleware',
-        tenantId: context.tenantId
+        ...ctx.metadata
       }
     });
     
@@ -102,37 +102,58 @@ export async function setupGitHubRepository(context: RequirementsContext): Promi
     }
     
     // Add GitHub info to context
-    context.githubInfo = result.repositoryInfo;
+    ctx.githubInfo = result.repositoryInfo;
     
     logger.info('✅ GitHub repository created successfully', {
-      repoUrl: result.repositoryInfo.url
+      repo: result.repositoryInfo.fullName,
+      url: result.repositoryInfo.url
     });
     
     // Update project metadata with GitHub repository information
-    await updateProjectMetadata(context.projectId, {
+    await updateProjectMetadata(projectId, {
       github: {
         status: 'success',
-        repositoryUrl: result.repositoryInfo.url,
-        repositoryInfo: result.repositoryInfo,
-        createdAt: new Date().toISOString()
+        completedAt: new Date().toISOString(),
+        repositoryInfo: result.repositoryInfo
       }
     });
     
-    return context;
+    return {
+      ...ctx,
+      phases: {
+        ...(ctx.phases || {}),
+        github: {
+          status: 'success',
+          message: 'GitHub repository setup successful',
+          repositoryInfo: result.repositoryInfo
+        }
+      }
+    };
   } catch (error) {
     logger.error('❌ GitHub repository setup failed', error);
-    context.githubError = error instanceof Error ? error : new Error(String(error));
     
     // Update metadata with error information
-    await updateProjectMetadata(context.projectId, {
-      github: {
-        status: 'failed',
-        error: error instanceof Error ? error.message : String(error),
-        failedAt: new Date().toISOString()
-      }
-    });
+    if (projectId) {
+      await updateProjectMetadata(projectId, {
+        github: {
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+          completedAt: new Date().toISOString()
+        }
+      });
+    }
     
-    return context;
+    return {
+      ...ctx,
+      githubError: error instanceof Error ? error : new Error(String(error)),
+      phases: {
+        ...(ctx.phases || {}),
+        github: {
+          status: 'failed',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      }
+    };
   }
 }
 

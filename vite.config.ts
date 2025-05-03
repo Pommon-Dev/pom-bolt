@@ -5,9 +5,9 @@ import { nodePolyfills } from 'vite-plugin-node-polyfills';
 import { optimizeCssModules } from 'vite-plugin-optimize-css-modules';
 import tsconfigPaths from 'vite-tsconfig-paths';
 import * as dotenv from 'dotenv';
-import { execSync } from 'child_process';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 dotenv.config();
 
@@ -92,6 +92,12 @@ export default defineConfig((config) => {
     },
     build: {
       target: 'esnext',
+      sourcemap: true,
+      rollupOptions: {
+        output: {
+          sourcemapExcludeSources: true,
+        },
+      },
     },
     plugins: [
       nodePolyfills({
@@ -104,6 +110,7 @@ export default defineConfig((config) => {
           v3_relativeSplatPath: true,
           v3_throwAbortReason: true,
           v3_lazyRouteDiscovery: true,
+          v3_singleFetch: true,
         },
       }),
       UnoCSS(),

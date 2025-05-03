@@ -27,11 +27,15 @@ const logger = createScopedLogger('project-state-manager');
  */
 export class ProjectStateManager {
   private storageAdapter: ProjectStorageAdapter;
-  private enhancedStorageService: ProjectStorageService | null = null;
+  private storageService: ProjectStorageService | null = null;
+  private enhancedStorageEnabled: boolean = false;
+  
+  // Static instance for singleton pattern
+  private static instance: ProjectStateManager;
   
   constructor(context?: any) {
     this.storageAdapter = this.selectStorageAdapter(context);
-    this.enhancedStorageService = this.createEnhancedStorageService(context);
+    this.storageService = this.createEnhancedStorageService(context);
     logger.info('ProjectStateManager initialized with storage adapter');
   }
   
@@ -154,10 +158,10 @@ export class ProjectStateManager {
       };
       
       // Save the project using the appropriate storage mechanism
-      if (this.enhancedStorageService) {
+      if (this.storageService) {
         // Convert to enhanced project state
         const enhancedProject = this.convertToEnhancedProject(project);
-        await this.enhancedStorageService.saveProject(enhancedProject);
+        await this.storageService.saveProject(enhancedProject);
       } else {
         await this.storageAdapter.saveProject(project);
       }
@@ -184,8 +188,8 @@ export class ProjectStateManager {
     try {
       let project: ProjectState | null = null;
       
-      if (this.enhancedStorageService) {
-        const enhancedProject = await this.enhancedStorageService.getProject(id);
+      if (this.storageService) {
+        const enhancedProject = await this.storageService.getProject(id);
         if (enhancedProject) {
           project = this.convertFromEnhancedProject(enhancedProject);
         }
@@ -249,8 +253,8 @@ export class ProjectStateManager {
   async projectExists(id: string): Promise<boolean> {
     logger.debug(`Checking if project ${id} exists`);
     try {
-      if (this.enhancedStorageService) {
-        return this.enhancedStorageService.projectExists(id);
+      if (this.storageService) {
+        return this.storageService.projectExists(id);
       } else {
         const exists = await this.storageAdapter.projectExists(id);
         logger.debug(`Project ${id} exists: ${exists}`);
@@ -372,10 +376,10 @@ export class ProjectStateManager {
     project.updatedAt = Date.now();
     
     // Save the updated project using the appropriate storage mechanism
-    if (this.enhancedStorageService) {
+    if (this.storageService) {
       // Convert to enhanced project state
       const enhancedProject = this.convertToEnhancedProject(project);
-      await this.enhancedStorageService.saveProject(enhancedProject);
+      await this.storageService.saveProject(enhancedProject);
     } else {
       await this.storageAdapter.saveProject(project);
     }
@@ -395,8 +399,8 @@ export class ProjectStateManager {
   async deleteProject(id: string): Promise<boolean> {
     logger.debug(`Deleting project ${id}`);
     try {
-      if (this.enhancedStorageService) {
-        return this.enhancedStorageService.deleteProject(id);
+      if (this.storageService) {
+        return this.storageService.deleteProject(id);
       } else {
         const result = await this.storageAdapter.deleteProject(id);
         logger.debug(`Project ${id} deletion result: ${result}`);
@@ -424,7 +428,7 @@ export class ProjectStateManager {
   }> {
     logger.debug('Listing projects', options);
     try {
-      if (this.enhancedStorageService) {
+      if (this.storageService) {
         // Convert options to search options
         const searchOptions = {
           query: '',
@@ -444,7 +448,7 @@ export class ProjectStateManager {
           } : undefined
         };
         
-        const result = await this.enhancedStorageService.searchProjects(searchOptions);
+        const result = await this.storageService.searchProjects(searchOptions);
         
         // Convert enhanced projects to regular projects
         const projects = result.projects.map(p => this.convertFromEnhancedProject(p));
@@ -557,10 +561,10 @@ export class ProjectStateManager {
     project.updatedAt = Date.now();
     
     // Save the updated project using the appropriate storage mechanism
-    if (this.enhancedStorageService) {
+    if (this.storageService) {
       // Convert to enhanced project state
       const enhancedProject = this.convertToEnhancedProject(project);
-      await this.enhancedStorageService.saveProject(enhancedProject);
+      await this.storageService.saveProject(enhancedProject);
     } else {
       await this.storageAdapter.saveProject(project);
     }
@@ -695,10 +699,10 @@ export class ProjectStateManager {
     project.updatedAt = Date.now();
     
     // Save the updated project using the appropriate storage mechanism
-    if (this.enhancedStorageService) {
+    if (this.storageService) {
       // Convert to enhanced project state
       const enhancedProject = this.convertToEnhancedProject(project);
-      await this.enhancedStorageService.saveProject(enhancedProject);
+      await this.storageService.saveProject(enhancedProject);
     } else {
       await this.storageAdapter.saveProject(project);
     }
@@ -805,10 +809,10 @@ export class ProjectStateManager {
   public async saveProject(project: ProjectState): Promise<void> {
     logger.debug(`Saving project ${project.id}`);
     try {
-      if (this.enhancedStorageService) {
+      if (this.storageService) {
         // Convert to enhanced project state
         const enhancedProject = this.convertToEnhancedProject(project);
-        await this.enhancedStorageService.saveProject(enhancedProject);
+        await this.storageService.saveProject(enhancedProject);
       } else {
         await this.storageAdapter.saveProject(project);
       }
@@ -819,21 +823,67 @@ export class ProjectStateManager {
       throw error;
     }
   }
+
+  /**
+   * Gets the singleton instance of ProjectStateManager
+   */
+  public static getInstance(context?: any): ProjectStateManager {
+    if (!ProjectStateManager.instance) {
+      // Create a new instance with the context
+      ProjectStateManager.instance = new ProjectStateManager(context);
+    } else if (context) {
+      // If we have an existing instance but are given a new context,
+      // update the storage adapter to use the new context
+      ProjectStateManager.instance.updateStorageAdapter(context);
+    }
+    
+    return ProjectStateManager.instance;
+  }
+
+  /**
+   * Update the storage adapter using a new context
+   * This is useful when the instance exists but we need to access resources
+   * from a different context (like in a Function request)
+   */
+  private updateStorageAdapter(context: any): void {
+    try {
+      // Only update if we have a Cloudflare context that might have KV/D1 bindings
+      if (context?.cloudflare?.env) {
+        logger.debug('Updating storage adapter with new context', {
+          contextType: typeof context,
+          hasCloudflare: !!context.cloudflare,
+          hasCfEnv: !!context.cloudflare.env
+        });
+        
+        // Try to create an enhanced storage service with the new context
+        const enhancedService = this.createEnhancedStorageService(context);
+        if (enhancedService) {
+          this.storageService = enhancedService;
+          return;
+        }
+        
+        // If that fails, try to update the existing adapter
+        if (this.storageAdapter && 'updateContext' in this.storageAdapter) {
+          (this.storageAdapter as any).updateContext(context);
+        } else {
+          // Last resort - create a new storage adapter
+          this.storageAdapter = this.selectStorageAdapter(context);
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to update storage adapter with new context', error);
+    }
+  }
 }
 
 // Export a singleton instance for convenience
 let stateManagerInstance: ProjectStateManager | null = null;
 
-// Accept optional context
+/**
+ * Singleton factory method for ProjectStateManager
+ */
 export function getProjectStateManager(context?: any): ProjectStateManager {
-  // Pass context to the constructor
-  // Simple singleton: If we have an instance, assume it was created with the correct context needed.
-  // More robust solution might involve context-keyed singletons or removing singleton.
-  if (!stateManagerInstance) {
-    stateManagerInstance = new ProjectStateManager(context);
-  }
-  
-  return stateManagerInstance;
+  return ProjectStateManager.getInstance(context);
 }
 
 export function resetProjectStateManager(): void {

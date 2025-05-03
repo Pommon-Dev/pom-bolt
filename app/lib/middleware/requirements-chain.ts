@@ -182,16 +182,59 @@ export async function parseRequest(
     
     // Extract GitHub options independent of deployment
     const setupGitHub = body.setupGitHub === true || body.setupGitHub === 'true';
-    const githubOptions = setupGitHub ? {
-      setupGitHub: true,
-      credentials: body.credentials?.github || undefined
-    } : undefined;
+    
+    // Set up githubOptions object
+    let githubOptions = undefined;
+    
+    if (setupGitHub) {
+      // First check for credentials.github (standard format)
+      if (body.credentials?.github?.token) {
+        githubOptions = {
+          setupGitHub: true,
+          credentials: {
+            token: body.credentials.github.token,
+            owner: body.credentials.github.owner
+          }
+        };
+        logger.debug('[parseRequest] Found GitHub credentials in body.credentials.github');
+      }
+      // Also try direct githubCredentials for backward compatibility
+      else if (body.githubCredentials?.token) {
+        githubOptions = {
+          setupGitHub: true,
+          credentials: {
+            token: body.githubCredentials.token,
+            owner: body.githubCredentials.owner
+          }
+        };
+        logger.debug('[parseRequest] Found GitHub credentials in body.githubCredentials');
+      }
+      // Also check for direct token and owner properties
+      else if (body.githubToken || body.GITHUB_TOKEN) {
+        githubOptions = {
+          setupGitHub: true,
+          credentials: {
+            token: body.githubToken || body.GITHUB_TOKEN,
+            owner: body.githubOwner || body.GITHUB_OWNER
+          }
+        };
+        logger.debug('[parseRequest] Found GitHub credentials in direct properties');
+      }
+      // If no credentials found but setupGitHub is true, still create the options
+      else {
+        githubOptions = {
+          setupGitHub: true
+        };
+        logger.debug('[parseRequest] No GitHub credentials found, but setupGitHub is true');
+      }
+    }
     
     logger.debug('[parseRequest] GitHub setup requested:', {
       setupGitHub,
       hasGithubCredentials: !!githubOptions?.credentials,
       hasToken: !!githubOptions?.credentials?.token,
-      hasOwner: !!githubOptions?.credentials?.owner
+      hasOwner: !!githubOptions?.credentials?.owner,
+      credentialSources: body.credentials ? Object.keys(body.credentials) : []
     });
     
     // For backward compatibility, also add setupGitHub to deploymentOptions
@@ -1028,16 +1071,6 @@ export async function triggerDeployment(req: RequirementsRequestContext, context
     }
   }
   
-  // Validate deployment target against credentials
-  if (shouldDeploy && req.deploymentTarget === 'netlify-github' && !validatedCredentials.github) {
-    logger.warn('netlify-github target requested but GitHub credentials missing');
-    // Fall back to netlify if github credentials are missing
-    if (validatedCredentials.netlify) {
-      logger.debug('Falling back to netlify target since GitHub credentials are missing');
-      req.deploymentTarget = 'netlify';
-    }
-  }
-  
   // If we should deploy, proceed with deployment
   if (shouldDeploy) {
     logger.info('Triggering deployment for project', { 
@@ -1258,11 +1291,14 @@ export async function runRequirementsChain(
     // Phase 4: GitHub integration (optional)
     if (context.githubOptions?.setupGitHub) {
       try {
-        // Import the GitHub integration middleware
-        const { setupGitHubRepository } = await import('./github-integration');
+        // Use our own setupGitHubRepository function instead of importing one that might not exist
+        logger.info('🚀 [runRequirementsChain] Starting GitHub repository setup');
         context = await setupGitHubRepository(context);
         
-        // Context is updated by the GitHub integration middleware with status
+        logger.info('✅ [runRequirementsChain] GitHub repository setup completed', {
+          success: !!context.githubInfo,
+          hasError: !!context.githubError
+        });
       } catch (error) {
         // Log error but continue
         logger.error('❌ GitHub setup failed but continuing', { error });
@@ -1677,20 +1713,50 @@ export async function setupGitHubRepository(context: RequirementsContext): Promi
     return context;
   }
 
-  logger.info('🚀 [setupGitHubRepository] Setting up GitHub repository');
+  logger.info('🚀 [setupGitHubRepository] Setting up GitHub repository', {
+    projectId: context.projectId,
+    hasGitHubOptionsCredentials: !!context.githubOptions?.credentials?.token,
+    hasDirectCredentials: !!(context.credentials?.github?.token)
+  });
   
   try {
-    // Get GitHub credentials
-    const credentialService = getCredentialService();
-    const githubCredentials = credentialService.getGitHubCredentials({
-      env: context.env,
-      requestData: context.deploymentOptions || {},
-      tenantId: context.tenantId
-    });
+    // First try direct credentials from github options
+    let githubCredentials = context.githubOptions?.credentials;
     
-    if (!githubCredentials) {
+    // If no direct credentials, try deployment credentials
+    if (!githubCredentials?.token && context.credentials?.github?.token) {
+      githubCredentials = {
+        token: context.credentials.github.token,
+        owner: context.credentials.github.owner
+      };
+    }
+    
+    // If neither direct nor deployment credentials, try credential service
+    if (!githubCredentials?.token) {
+      const credentialService = getCredentialService();
+      const serviceCredentials = credentialService.getGitHubCredentials({
+        env: context.env,
+        requestData: context.deploymentOptions || {},
+        tenantId: context.tenantId
+      });
+      
+      if (serviceCredentials?.token) {
+        githubCredentials = {
+          token: serviceCredentials.token,
+          owner: serviceCredentials.owner
+        };
+      }
+    }
+    
+    if (!githubCredentials?.token) {
       throw new Error('GitHub credentials required but not provided');
     }
+    
+    logger.debug('🔐 [setupGitHubRepository] GitHub credentials found', {
+      hasToken: !!githubCredentials.token,
+      hasOwner: !!githubCredentials.owner,
+      tokenLength: githubCredentials.token.length
+    });
     
     // Update metadata to show GitHub setup in progress
     await updateProjectMetadata(context.projectId, {
@@ -1724,13 +1790,24 @@ export async function setupGitHubRepository(context: RequirementsContext): Promi
     context.githubInfo = result.repositoryInfo;
     
     logger.info('✅ [setupGitHubRepository] GitHub repository created successfully', {
-      repoUrl: result.repositoryInfo.url
+      repoUrl: result.repositoryInfo.url,
+      repoName: result.repositoryInfo.fullName
     });
     
     return context;
   } catch (error) {
     logger.error('❌ [setupGitHubRepository] GitHub repository setup failed', error);
     context.githubError = error instanceof Error ? error : new Error(String(error));
+    
+    // Update metadata with error information
+    await updateProjectMetadata(context.projectId, {
+      github: {
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+        failedAt: new Date().toISOString()
+      }
+    });
+    
     return context;
   }
 }

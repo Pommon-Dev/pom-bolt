@@ -112,6 +112,14 @@ export default class OpenAIProvider extends BaseProvider {
           (serverEnv as any)?.env?.OPENAI_API_KEY || 
           (serverEnv as any)?.cloudflare?.env?.OPENAI_API_KEY;
         
+        // Check for environment-specific keys (e.g., preview environment)
+        const envInfo = this.getEnvironmentInfo(serverEnv);
+        const previewKey = 
+          (serverEnv as any)?.PREVIEW_OPENAI_API_KEY ||
+          (serverEnv as any)?.env?.PREVIEW_OPENAI_API_KEY ||
+          (serverEnv as any)?.cloudflare?.env?.PREVIEW_OPENAI_API_KEY ||
+          (envInfo.isPreview ? (serverEnv as any)?.OPENAI_API_KEY_PREVIEW : null);
+        
         if (directKey) {
           logger.info('Retrieved OpenAI API key through direct access');
           
@@ -123,9 +131,21 @@ export default class OpenAIProvider extends BaseProvider {
           return openai(model);
         }
         
+        if (previewKey) {
+          logger.info('Retrieved OpenAI API key through preview environment-specific access');
+          
+          // Create OpenAI instance with the preview key
+          const openai = createOpenAI({
+            apiKey: previewKey,
+          });
+          
+          return openai(model);
+        }
+        
         logger.error('Missing API key for OpenAI provider when creating model instance', {
-          keyVarChecked: 'OPENAI_API_KEY',
-          directAccessAttempted: true
+          keyVarChecked: 'OPENAI_API_KEY, PREVIEW_OPENAI_API_KEY, OPENAI_API_KEY_PREVIEW',
+          directAccessAttempted: true,
+          isPreview: envInfo.isPreview
         });
         throw new Error(`Missing API key for ${this.name} provider`);
       }
@@ -150,5 +170,59 @@ export default class OpenAIProvider extends BaseProvider {
       });
       throw error; // Re-throw to allow proper error handling
     }
+  }
+
+  /**
+   * Helper method to determine environment info from server environment
+   */
+  private getEnvironmentInfo(serverEnv: any): { isProduction: boolean; isPreview: boolean; isDevelopment: boolean } {
+    // Default values
+    const info = {
+      isProduction: false,
+      isPreview: false,
+      isDevelopment: false
+    };
+    
+    if (!serverEnv) return info;
+    
+    const environment = serverEnv.ENVIRONMENT || 
+      (serverEnv.env && serverEnv.env.ENVIRONMENT) || 
+      (serverEnv.cloudflare && serverEnv.cloudflare.env && serverEnv.cloudflare.env.ENVIRONMENT);
+      
+    const isCFPages = serverEnv.CF_PAGES === '1' || 
+      (serverEnv.env && serverEnv.env.CF_PAGES === '1') || 
+      (serverEnv.cloudflare && serverEnv.cloudflare.env && serverEnv.cloudflare.env.CF_PAGES === '1');
+      
+    const cfPagesBranch = serverEnv.CF_PAGES_BRANCH || 
+      (serverEnv.env && serverEnv.env.CF_PAGES_BRANCH) || 
+      (serverEnv.cloudflare && serverEnv.cloudflare.env && serverEnv.cloudflare.env.CF_PAGES_BRANCH);
+    
+    if (environment === 'production') {
+      info.isProduction = true;
+    } else if (environment === 'preview') {
+      info.isPreview = true;
+    } else if (environment === 'development') {
+      info.isDevelopment = true;
+    } else if (isCFPages) {
+      // If we're in a Cloudflare Pages deployment
+      if (cfPagesBranch === 'main' || cfPagesBranch === 'master') {
+        info.isProduction = true;
+      } else {
+        info.isPreview = true;
+      }
+    } else {
+      // Fallback to NODE_ENV
+      const nodeEnv = serverEnv.NODE_ENV || 
+        (serverEnv.env && serverEnv.env.NODE_ENV) || 
+        (serverEnv.cloudflare && serverEnv.cloudflare.env && serverEnv.cloudflare.env.NODE_ENV);
+      
+      if (nodeEnv === 'production') {
+        info.isProduction = true;
+      } else if (nodeEnv === 'development') {
+        info.isDevelopment = true;
+      }
+    }
+    
+    return info;
   }
 }

@@ -54,7 +54,6 @@ export enum DeploymentWorkflowState {
   GITHUB_REPO_CREATED = 'github-repo-created',
   GITHUB_FILES_UPLOADED = 'github-files-uploaded',
   NETLIFY_SITE_CREATED = 'netlify-site-created',
-  NETLIFY_GITHUB_LINKED = 'netlify-github-linked',
   DEPLOYMENT_COMPLETE = 'deployment-complete',
   DEPLOYING = 'deploying',
   FAILED = 'failed'

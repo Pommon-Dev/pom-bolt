@@ -7,3 +7,10 @@ import * as serverBuild from '../build/server';
 export const onRequest = createPagesFunctionHandler({
   build: serverBuild as unknown as ServerBuild,
 });
+
+// Add default export for ES Module format
+export default {
+  fetch: createPagesFunctionHandler({
+    build: serverBuild as unknown as ServerBuild,
+  }),
+};

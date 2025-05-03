@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Environment, EnvironmentInfo } from './base';
 import { EnvironmentType, StorageType, BaseEnvironment } from './base';
 import { createScopedLogger } from '~/utils/logger';
-import * as os from 'os';
+import * as os from 'node:os';
 
 const logger = createScopedLogger('local-environment');
 
@@ -190,10 +190,12 @@ export class LocalEnvironment extends BaseEnvironment {
     }
 
     try {
-      return os.tmpdir();
+      // In Node.js environment, use os.tmpdir
+      // In Cloudflare Workers, return a fallback path
+      return os?.tmpdir?.() || '/tmp';
     } catch (error) {
       logger.error('Error getting temp directory path:', error);
-      return null;
+      return '/tmp';
     }
   }
 

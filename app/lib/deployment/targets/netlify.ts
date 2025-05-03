@@ -101,33 +101,76 @@ export class NetlifyTarget extends BaseDeploymentTarget {
    */
   private async fetchNetlifyApi<T>(path: string, options: RequestInit = {}): Promise<Response> {
     try {
-      const response = await fetch(`${NETLIFY_API_BASE}${path}`, {
-        ...options,
-        headers: {
-          'Authorization': `Bearer ${this.config.token}`,
-          'Content-Type': 'application/json',
-          ...options.headers
+      // Ensure we have an API token
+      const apiToken = this.config.token || this.config.apiToken;
+      if (!apiToken) {
+        throw new Error('Netlify API token is required');
+      }
+
+      // Set up API URL
+      const url = `${this.netlifyApiBase}${path}`;
+      
+      // Set up request headers
+      const headers = {
+        'Authorization': `Bearer ${apiToken}`,
+        'Content-Type': 'application/json',
+        ...options.headers
+      };
+      
+      logger.debug(`📡 Netlify API request: ${options.method || 'GET'} ${path}`);
+      
+      // More conservative approach for handling rate limits
+      let attempts = 0;
+      const maxAttempts = 3;  // Reduced from 5 to 3
+      const baseDelay = 3000; // Start with 3 second delay
+      
+      while (attempts < maxAttempts) {
+        try {
+          const response = await fetch(url, {
+            ...options,
+            headers
+          });
+          
+          // Check if we hit rate limits and should retry
+          if (response.status === 429) {
+            attempts++;
+            
+            // Honor the retry-after header if provided
+            const retryAfter = response.headers.get('retry-after');
+            const retrySeconds = retryAfter ? parseInt(retryAfter, 10) : 30;
+            
+            // Use the suggested wait time or fallback to our calculated delay
+            const delay = retrySeconds ? (retrySeconds * 1000) : 
+              baseDelay * Math.pow(3, attempts); // More aggressive (pow 3 instead of 2)
+            
+            logger.warn(`Netlify API rate limit hit, retrying in ${Math.round(delay/1000)}s (attempt ${attempts}/${maxAttempts})`);
+            
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+          
+          // For non-rate limit errors, return the response for processing by the caller
+          return response;
+        } catch (fetchError) {
+          attempts++;
+          
+          // Only retry network errors, not API errors
+          if (attempts >= maxAttempts || !(fetchError instanceof Error && fetchError.message.includes('network'))) {
+            throw fetchError;
+          }
+          
+          const delay = baseDelay * Math.pow(3, attempts);
+          logger.warn(`Netlify API network error, retrying in ${Math.round(delay/1000)}s (attempt ${attempts}/${maxAttempts})`);
+          await new Promise(resolve => setTimeout(resolve, delay));
         }
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({})) as { message?: string };
-        throw this.createError(
-          DeploymentErrorType.API_ERROR,
-          `Netlify API error: ${errorData.message || response.statusText}`
-        );
       }
-
-      return response;
-    } catch (error: unknown) {
-      if (error instanceof Error && error.name === DeploymentErrorType.API_ERROR) {
-        throw error;
-      }
-      throw this.createError(
-        DeploymentErrorType.API_ERROR,
-        `Netlify API request failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        error instanceof Error ? error : undefined
-      );
+      
+      // If we reached max attempts with rate limits, throw a specific error
+      throw new Error('Netlify API rate limit exceeded after multiple attempts');
+    } catch (error) {
+      logger.error('Netlify API request failed:', error);
+      throw error;
     }
   }
 
@@ -242,7 +285,45 @@ export class NetlifyTarget extends BaseDeploymentTarget {
     // Validate options first
     this.validateOptions(options);
 
-    const siteId = options.projectId;
+    // Don't use projectId as siteId directly
+    // Instead, try to find the Netlify site ID from various sources
+    let siteId: string;
+    
+    // 1. First check if we have a site ID in the options
+    if (options.metadata?.netlify?.siteId) {
+      siteId = options.metadata.netlify.siteId;
+      logger.debug(`Using Netlify site ID from metadata: ${siteId}`);
+    } 
+    // 2. Try to use the site ID from a previously created site
+    else {
+      try {
+        // Try to find the site by name first
+        const sanitizedName = this.sanitizeProjectName(options.projectName);
+        const existingSite = await this.findSiteByName(sanitizedName);
+        
+        if (existingSite) {
+          siteId = existingSite.id;
+          logger.debug(`Found Netlify site by name: ${sanitizedName}, site ID: ${siteId}`);
+        } else {
+          // Last resort - try to initialize a new site
+          logger.info(`No existing Netlify site found for ${options.projectName}, creating new site`);
+          const metadata = await this.initializeProject({
+            name: options.projectName
+          });
+          
+          siteId = metadata.id;
+          logger.info(`Created new Netlify site: ${metadata.name} (ID: ${siteId})`);
+        }
+      } catch (error) {
+        logger.error(`Failed to find or create Netlify site: ${error}`);
+        throw this.createError(
+          DeploymentErrorType.INITIALIZATION_FAILED,
+          `Failed to find or create Netlify site: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          error instanceof Error ? error : undefined
+        );
+      }
+    }
+    
     logger.debug(`Deploying to Netlify site ID: ${siteId}`);
 
     try {
@@ -557,78 +638,131 @@ export class NetlifyTarget extends BaseDeploymentTarget {
    * Wait for a deployment to complete with improved error handling
    */
   private async waitForDeployment(siteId: string, deployId: string): Promise<DeploymentResult> {
-    const maxAttempts = 30;
-    const delayMs = 2000;
-    let attempts = 0;
-    let lastError: Error | null = null;
-
-    logger.debug(`Waiting for deployment to complete for site ${siteId}, deploy ${deployId}`);
-    
-    while (attempts < maxAttempts) {
-      try {
-        logger.debug(`Checking deployment status (attempt ${attempts + 1}/${maxAttempts})`);
+    try {
+      logger.info(`🔍 Checking Netlify deployment status for: ${deployId}`);
+      
+      // More conservative polling configuration
+      const initialDelay = 20000;      // 20 seconds initial wait
+      const maxDelay = 60000;         // 60 seconds max between checks
+      const maxAttempts = 5;          // Cap at 5 attempts total
+      const totalTimeout = 60 * 1000; // 60 second total timeout
+      
+      let currentDelay = initialDelay;
+      let consecutiveErrors = 0;
+      const maxConsecutiveErrors = 3;
+      
+      const startTime = Date.now();
+      
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        // Check if we've exceeded total time allowed
+        if (Date.now() - startTime > totalTimeout) {
+          logger.warn(`Deployment verification timed out after ${totalTimeout/1000}s total duration`);
+          break;
+        }
         
-        const response = await this.fetchNetlifyApi<NetlifyDeploy>(`/sites/${siteId}/deploys/${deployId}`);
-        const deploy = await response.json() as NetlifyDeploy;
-
-        logger.debug(`Deployment status: ${deploy.status}`, {
-          deployId,
-          attempt: attempts + 1,
-          totalAttempts: maxAttempts
-        });
-        
-        if (deploy.status === 'ready') {
-          logger.info(`Deployment ${deployId} completed successfully`);
-          return {
-            id: deploy.id,
-            url: deploy.ssl_url || deploy.deploy_url,
-            status: 'success',
-            logs: [`Deployment completed successfully`],
-            provider: this.getProviderType(),
-            metadata: {
-              siteId,
-              deployId: deploy.id,
-              verificationMethod: 'standard'
+        try {
+          // Wait before checking status
+          await new Promise(resolve => setTimeout(resolve, currentDelay));
+          
+          // Check deployment status
+          const response = await this.fetchNetlifyApi(`/sites/${siteId}/deploys/${deployId}`);
+          
+          // If we get a successful response, reset consecutive errors
+          consecutiveErrors = 0;
+          
+          if (!response.ok) {
+            // Handle API error
+            const errorText = await response.text();
+            logger.warn(`Error checking deployment status (attempt ${attempt}/${maxAttempts}): ${response.status} ${response.statusText} - ${errorText}`);
+            
+            // Special handling for rate limits (429)
+            if (response.status === 429) {
+              // Get retry-after header if available
+              const retryAfter = response.headers.get('retry-after');
+              const retrySeconds = retryAfter ? parseInt(retryAfter, 10) : 30;
+              
+              // Use the server's suggestion or a longer delay
+              currentDelay = Math.max(retrySeconds * 1000, maxDelay);
+              logger.warn(`Rate limit hit, waiting ${retrySeconds}s before retry`);
+              continue;
             }
-          };
+            
+            // For other errors, increase delay more aggressively
+            currentDelay = Math.min(currentDelay * 2, maxDelay);
+            continue;
+          }
+          
+          const deploy = await response.json() as NetlifyDeploy;
+          
+          // Log status on first check and when it changes
+          logger.debug(`Deployment status: ${deploy.status} (attempt ${attempt}/${maxAttempts})`);
+          
+          if (deploy.status === 'ready') {
+            logger.info(`✅ Netlify deployment complete: ${deploy.deploy_url}`);
+            return {
+              id: deploy.id,
+              url: deploy.ssl_url || deploy.deploy_url,
+              status: 'success',
+              logs: [`Deployment URL: ${deploy.ssl_url || deploy.deploy_url}`],
+              provider: this.getProviderType(),
+              metadata: {
+                siteId,
+                deployId: deploy.id,
+                verificationMethod: 'standard'
+              }
+            };
+          }
+          
+          if (deploy.status === 'error') {
+            logger.error(`❌ Netlify deployment failed: ${deploy.error_message || 'Unknown error'}`);
+            throw new Error(`Netlify deployment failed: ${deploy.error_message || 'Unknown error'}`);
+          }
+          
+          // For in-progress deployments, we'll use a more aggressive backoff strategy
+          currentDelay = Math.min(currentDelay * 1.5, maxDelay);
+        } catch (error) {
+          consecutiveErrors++;
+          
+          // If we hit API errors multiple times in a row, we might want to give up
+          if (consecutiveErrors >= maxConsecutiveErrors) {
+            logger.error(`Too many consecutive errors checking deployment status, giving up`);
+            throw new Error('Netlify API request failed: Too many consecutive errors.');
+          }
+          
+          // For individual errors, log and increase backoff
+          logger.warn(`Error checking deployment status (attempt ${attempt}/${maxAttempts}): ${error instanceof Error ? error.message : String(error)}`);
+          
+          // Increase delay more aggressively for consecutive errors
+          currentDelay = Math.min(currentDelay * 2, maxDelay);
         }
-
-        if (deploy.status === 'error') {
-          const errorMessage = deploy.error_message || 'Deployment reported error status without details';
-          logger.error(`Deployment ${deployId} failed: ${errorMessage}`);
-          throw new Error(`Deployment failed: ${errorMessage}`);
-        }
-        
-        // If still processing, wait and try again
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-        attempts++;
-      } catch (error) {
-        // If we get a specific error like Not Found, don't retry - pass to caller
-        if (error instanceof Error && 
-            (error.message.includes('Not Found') || 
-             error.message.includes('Unauthorized'))) {
-          logger.warn(`Received ${error.message} error while checking deployment status`);
-          throw error;
-        }
-        
-        // For other errors, log and retry a few times
-        lastError = error instanceof Error ? error : new Error(String(error));
-        logger.warn(`Error checking deployment status (attempt ${attempts + 1}/${maxAttempts}): ${lastError.message}`);
-        
-        // Only retry network errors a few times
-        if (attempts >= 5) {
-          logger.error(`Too many errors checking deployment status, giving up`);
-          throw lastError;
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-        attempts++;
+      }
+      
+      // If we reach here, verification timed out or reached max attempts
+      logger.warn(`Deployment ${deployId} verification timed out or reached maximum attempts`);
+      
+      // Try one last verification through alternative methods
+      return await this.verifyDeploymentByAlternativeMethod(siteId, {
+        id: deployId,
+        site_id: siteId,
+        status: 'unknown',
+        deploy_url: `https://deploy-preview-unknown--${siteId}.netlify.app` // Guess a potential URL
+      });
+    } catch (error) {
+      logger.warn(`Error waiting for deployment: ${error instanceof Error ? error.message : String(error)}`);
+      
+      // Try alternative verification as a last resort
+      try {
+        return await this.verifyDeploymentByAlternativeMethod(siteId, {
+          id: deployId,
+          site_id: siteId,
+          status: 'unknown',
+          deploy_url: `https://deploy-preview-unknown--${siteId}.netlify.app` // Guess a potential URL
+        });
+      } catch (altError) {
+        // If both methods fail, throw the original error
+        throw error;
       }
     }
-
-    const timeoutError = new Error(`Deployment verification timed out after ${maxAttempts} attempts`);
-    logger.error(`Deployment ${deployId} verification timed out`);
-    throw timeoutError;
   }
 
   async getDeploymentStatus(deploymentId: string): Promise<DeploymentStatus> {

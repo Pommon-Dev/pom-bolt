@@ -265,8 +265,11 @@ export async function handleProcessRequirements({ request, context }: ActionFunc
       bodyKeys: Object.keys(body),
       hasCredentials: !!body.credentials,
       credentialKeys: body.credentials ? Object.keys(body.credentials) : [],
+      hasGithubCreds: !!body.credentials?.github?.token,
       deploymentTarget: body.deploymentTarget,
-      setupGitHub: body.setupGitHub
+      setupGitHub: body.setupGitHub,
+      hasGithubCredentials: !!body.githubCredentials?.token,
+      githubToken: body.githubToken ? 'present' : 'not present',
     });
 
     // Extract tenant ID from request

@@ -486,19 +486,38 @@ export function getNetlifyCredentials(context: any = {}): { apiToken?: string } 
   logger.debug('Netlify credentials context structure:', {
     contextType: typeof context,
     hasCloudflare: !!context.cloudflare,
-    hasEnv: !!context.env
+    hasEnv: !!context.env,
+    hasCfEnv: !!context.cloudflare?.env,
   });
   
   // Try multiple paths to find the environment variables
-  const env = context.cloudflare?.env || context.env || {};
+  // First check cloudflare.env (Cloudflare Pages environment)
+  const cfEnv = context.cloudflare?.env || {};
+  
+  // Then check direct env property as fallback
+  const env = context.env || {};
   
   // Check for both possible environment variable names
-  const apiToken = typeof env.NETLIFY_API_TOKEN === 'string' ? env.NETLIFY_API_TOKEN : 
-                  typeof env.NETLIFY_AUTH_TOKEN === 'string' ? env.NETLIFY_AUTH_TOKEN : 
-                  undefined;
+  const apiToken = 
+    cfEnv.NETLIFY_API_TOKEN || // First check CF env NETLIFY_API_TOKEN
+    cfEnv.NETLIFY_AUTH_TOKEN || // Then check CF env NETLIFY_AUTH_TOKEN
+    env.NETLIFY_API_TOKEN || // Then check direct env NETLIFY_API_TOKEN
+    env.NETLIFY_AUTH_TOKEN || // Then check direct env NETLIFY_AUTH_TOKEN
+    process.env.NETLIFY_API_TOKEN || // Then check process.env NETLIFY_API_TOKEN
+    process.env.NETLIFY_AUTH_TOKEN || // Finally check process.env NETLIFY_AUTH_TOKEN
+    undefined;
   
   logger.debug('Netlify credentials status:', { 
-    hasApiToken: !!apiToken
+    hasApiToken: !!apiToken,
+    tokenPrefix: apiToken ? apiToken.substring(0, 4) : 'none',
+    tokenLength: apiToken ? apiToken.length : 0,
+    sourceType: 
+      cfEnv.NETLIFY_API_TOKEN ? 'CF_API_TOKEN' :
+      cfEnv.NETLIFY_AUTH_TOKEN ? 'CF_AUTH_TOKEN' :
+      env.NETLIFY_API_TOKEN ? 'ENV_API_TOKEN' :
+      env.NETLIFY_AUTH_TOKEN ? 'ENV_AUTH_TOKEN' :
+      process.env.NETLIFY_API_TOKEN ? 'PROCESS_API_TOKEN' :
+      process.env.NETLIFY_AUTH_TOKEN ? 'PROCESS_AUTH_TOKEN' : 'none'
   });
   
   if (!apiToken) {
@@ -518,18 +537,38 @@ export function getGitHubCredentials(context: any = {}): { token?: string; owner
   logger.debug('GitHub credentials context structure:', {
     contextType: typeof context,
     hasCloudflare: !!context.cloudflare,
-    hasEnv: !!context.env
+    hasEnv: !!context.env,
+    hasCfEnv: !!context.cloudflare?.env
   });
   
-  // Try multiple paths to find the environment variables
-  const env = context.cloudflare?.env || context.env || {};
+  // First check cloudflare.env (Cloudflare Pages environment)
+  const cfEnv = context.cloudflare?.env || {};
   
-  const token = typeof env.GITHUB_TOKEN === 'string' ? env.GITHUB_TOKEN : undefined;
-  const owner = typeof env.GITHUB_OWNER === 'string' ? env.GITHUB_OWNER : undefined;
+  // Then check direct env property as fallback
+  const env = context.env || {};
+  
+  // Check all possible paths for credentials
+  const token = 
+    cfEnv.GITHUB_TOKEN || 
+    env.GITHUB_TOKEN || 
+    process.env.GITHUB_TOKEN || 
+    undefined;
+    
+  const owner = 
+    cfEnv.GITHUB_OWNER || 
+    env.GITHUB_OWNER || 
+    process.env.GITHUB_OWNER || 
+    undefined;
   
   logger.debug('GitHub credentials status:', { 
     hasToken: !!token,
-    hasOwner: !!owner
+    hasOwner: !!owner,
+    tokenLength: token ? token.length : 0,
+    ownerValue: owner || 'none',
+    sourceType: 
+      cfEnv.GITHUB_TOKEN ? 'CF_ENV' :
+      env.GITHUB_TOKEN ? 'ENV' :
+      process.env.GITHUB_TOKEN ? 'PROCESS_ENV' : 'none'
   });
   
   if (!token) {

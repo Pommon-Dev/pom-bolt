@@ -26,8 +26,9 @@ interface DemoMagicDeployBody {
   requirements: string;
   projectName?: string;
   netlifyCredentials?: { apiToken?: string };
-  githubCredentials?: { token?: string; owner?: string }; // Added GitHub credentials
-  deploymentTarget?: 'netlify' | 'netlify-github'; // Added support for netlify-github
+  githubCredentials?: { token?: string; owner?: string }; 
+  deploymentTarget?: 'netlify'; // Remove netlify-github option
+  setupGitHub?: boolean; // Explicit flag to set up GitHub
 }
 
 // netlify-demo-flow: Main action function refactored to use the FULL requirements chain
@@ -49,7 +50,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
         netlifyCredentials: requestData.netlifyCredentials,
         githubCredentials: requestData.githubCredentials,
         // Flag to setup GitHub if netlify-github is selected
-        setupGitHub: requestData.deploymentTarget === 'netlify-github'
+        setupGitHub: !!requestData.setupGitHub
       }
     };
     
